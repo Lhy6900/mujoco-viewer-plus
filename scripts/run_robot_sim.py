@@ -103,22 +103,40 @@ try:
         # If policy provides reference joint positions (joint_pos), forward them to the simulator viewer as ghosts
         try:
             if hasattr(policy, "output_tensors") and "joint_pos" in policy.output_tensors:
-                qref = policy.output_tensors["joint_pos"]
-                # qref may be shape (1, n) or (n,); pick first batch row
                 import numpy as _np
-                qref_arr = _np.asarray(qref)
-                if qref_arr.ndim >= 2:
-                    qpose_joints = qref_arr.squeeze(0)
-                else:
-                    qpose_joints = qref_arr
                 
-                # Expand joint positions to full qpos (base_pos + base_quat + joints)
-                # MuJoCo qpos for humanoid: [base_xyz(3), base_quat(4), joints(29)] = 36
+                # Extract policy outputs
+                qref_joints = policy.output_tensors["joint_pos"]
+                if qref_joints.ndim >= 2:
+                    qref_joints = qref_joints.squeeze(0)
+                
+                # CRITICAL: Ghost pose must be in WORLD frame, NOT robot frame
+                # Extract base pose from policy output (world coordinates)
+                qpose_full = _np.zeros(env.simulator.data.qpos.shape)
+                
+                if "body_pos_w" in policy.output_tensors and "body_quat_w" in policy.output_tensors:
+                    # Use policy's predicted world-frame base pose (correct approach, following mjlab)
+                    body_pos_w = policy.output_tensors["body_pos_w"]  # shape: (1, 14, 3)
+                    body_quat_w = policy.output_tensors["body_quat_w"]  # shape: (1, 14, 4)
+                    
+                    # Index 0 is typically the root/base body (pelvis)
+                    base_pos = body_pos_w[0, 0, :]  # (3,)
+                    base_quat = body_quat_w[0, 0, :]  # (4,)
+                    
+                    qpose_full[0:3] = base_pos  # world position
+                    qpose_full[3:7] = base_quat  # world quaternion (w,x,y,z)
+                else:
+                    # Fallback: if policy doesn't output base pose, use a fixed reference pose
+                    # (This should NOT happen with the current policy, but kept for safety)
+                    logger_mp.warning("Policy missing body_pos_w or body_quat_w - using fixed base pose for ghost")
+                    qpose_full[0:3] = [0, 0, 0.85]  # Fixed position above ground
+                    qpose_full[3:7] = [1, 0, 0, 0]  # Identity quaternion
+                
+                # Set joint positions from policy
+                qpose_full[7:7+len(qref_joints)] = qref_joints
+                
+                # Send to viewer
                 if hasattr(env.simulator, "add_ghost_trajectory"):
-                    # Get current base position and orientation from robot state
-                    qpose_full = _np.zeros(env.simulator.data.qpos.shape)
-                    qpose_full[:7] = env.simulator.data.qpos[:7]  # Copy current base pose
-                    qpose_full[7:7+len(qpose_joints)] = qpose_joints  # Set joint positions
                     env.simulator.add_ghost_trajectory(qpose_full)
         except Exception:
             logger_mp.exception("Failed to push ghost pose to simulator viewer")

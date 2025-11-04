@@ -27,8 +27,15 @@ class ViewerPlus:
         # Native viewer handle
         self.viewer = mujoco.viewer.launch_passive(self.model, self.data, key_callback=self._key_callback)
 
+        # Create ghost model (deep copy with semi-transparent appearance)
+        # Following mjlab's approach: create a separate model for ghost with custom colors
+        import copy
+        self._ghost_model = copy.deepcopy(model)
+        ghost_color = self.cfg.get("ghost_color", [0.5, 0.7, 0.5, 0.5])  # Semi-transparent green
+        self._ghost_model.geom_rgba[:] = np.array(ghost_color, dtype=np.float32)
+        
         # Auxiliary data used for ghost rendering (one MjData reused per ghost render)
-        self._viz_data = mujoco.MjData(self.model)
+        self._viz_data = mujoco.MjData(self._ghost_model)
         self._vopt = mujoco.MjvOption()
         self._vopt.flags[mujoco.mjtVisFlag.mjVIS_TRANSPARENT] = True
         self._pert = mujoco.MjvPerturb()
@@ -194,9 +201,9 @@ class ViewerPlus:
                 qpos = traj[frame_idx]
                 try:
                     self._viz_data.qpos[:] = qpos
-                    mujoco.mj_forward(self.model, self._viz_data)
+                    mujoco.mj_forward(self._ghost_model, self._viz_data)
                     mujoco.mjv_addGeoms(
-                        self.model,
+                        self._ghost_model,
                         self._viz_data,
                         self._vopt,
                         self._pert,
@@ -210,9 +217,9 @@ class ViewerPlus:
             for (_env_idx, qpos) in self._ghost_list:
                 try:
                     self._viz_data.qpos[:] = qpos
-                    mujoco.mj_forward(self.model, self._viz_data)
+                    mujoco.mj_forward(self._ghost_model, self._viz_data)
                     mujoco.mjv_addGeoms(
-                        self.model,
+                        self._ghost_model,
                         self._viz_data,
                         self._vopt,
                         self._pert,
