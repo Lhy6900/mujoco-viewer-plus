@@ -1,0 +1,12 @@
+[project]
+name = "deploy_robot"
+version = "0.1.0"
+description = "A python package for deploying unitree robots"
+requires-python = ">=3.8"
+
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["deploy_robot"]
