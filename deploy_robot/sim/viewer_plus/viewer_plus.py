@@ -8,12 +8,11 @@ logger_mp = logging_mp.get_logger(__name__)
 
 
 class ViewerPlus:
-    """A lightweight enhanced MuJoCo viewer supporting multi-env ghost rendering and reward plots.
+    """A lightweight enhanced MuJoCo viewer with ghost rendering and reward plots.
 
-    This is intentionally minimal and uses MuJoCo native APIs so it has small dependencies.
-    Features:
-    - Multi-environment ghost rendering (each env can have own trajectory)
-    - Trajectory playback aligned with simulation time_step
+    Simplified design following mjlab pattern:
+    - Direct ghost rendering (no complex trajectory playback)
+    - Single environment support (first env only)
     - Reward plotting with MjvFigure
     - Ctrl+G to toggle ghost, Ctrl+R to toggle reward plots
     """
@@ -21,7 +20,6 @@ class ViewerPlus:
     def __init__(self, model: mujoco.MjModel, data: mujoco.MjData, config: Optional[dict] = None, num_envs: int = 1):
         self.model = model
         self.data = data
-        self.num_envs = int(num_envs)
         self.cfg = config or {}
 
         # Native viewer handle
@@ -41,13 +39,8 @@ class ViewerPlus:
         self._pert = mujoco.MjvPerturb()
         self._catmask = mujoco.mjtCatBit.mjCAT_DYNAMIC.value
 
-        # Ghost storage: per-frame list of tuples (env_idx, qpos)
-        self._ghost_list: List[tuple[int, np.ndarray]] = []
-        
-        # Trajectory playback: dict env_idx -> (trajectory_array, current_step)
-        # trajectory_array shape: (T, nq)
-        self._trajectories: Dict[int, tuple[np.ndarray, int]] = {}
-        self._trajectory_step = 0  # Global step counter for trajectory playback
+        # Ghost qpos for current frame (simple: just one qpos per frame)
+        self._ghost_qpos: Optional[np.ndarray] = None
 
         # Reward plotter
         from deploy_robot.sim.viewer_plus.reward_plotter import RewardPlotter
@@ -109,52 +102,29 @@ class ViewerPlus:
             # Reset ctrl state if another key is pressed
             self._ctrl_pressed = False
 
-    def add_ghost(self, qpos: np.ndarray, env_idx: int = 0) -> None:
-        """Schedule a ghost pose to be rendered on next sync (single frame).
-
-        qpos: 1D array of qpos length (nq) or 2D shaped (num_envs, nq)
-        env_idx: which environment index this ghost corresponds to (for multi-env)
+    def add_ghost(self, qpos: np.ndarray) -> None:
+        """Set ghost pose for rendering in next sync() call.
+        
+        Following mjlab pattern: simple and direct.
+        qpos: 1D array of shape (nq,) - joint positions for ghost
+        
+        Note: This is called every frame before sync(). Only one ghost pose
+        is stored at a time (replaces previous if called multiple times).
         """
         if qpos is None:
-            return
-        arr = np.asarray(qpos).copy()
-        if arr.ndim == 2:
-            # if batch, pick env_idx row (if in range) or 0
-            if arr.shape[0] > env_idx:
-                arr = arr[env_idx]
-            else:
-                arr = arr[0]
-        self._ghost_list.append((int(env_idx), arr))
-
-    def set_trajectory(self, trajectory: np.ndarray, env_idx: int = 0) -> None:
-        """Set a trajectory to play back aligned with simulation time_step.
-        
-        trajectory: shape (T, nq) or (nq,) - if 1D, treat as single pose
-        env_idx: which environment this trajectory belongs to
-        
-        The trajectory will be played back frame-by-frame synchronized with 
-        the simulation step counter (self._trajectory_step).
-        """
-        if trajectory is None:
-            if env_idx in self._trajectories:
-                del self._trajectories[env_idx]
+            self._ghost_qpos = None
             return
         
-        arr = np.asarray(trajectory).copy()
-        if arr.ndim == 1:
-            # Single pose, wrap in array
-            arr = arr.reshape(1, -1)
+        arr = np.asarray(qpos, dtype=np.float32)
+        if arr.ndim != 1:
+            logger_mp.warning("add_ghost expects 1D qpos, got shape %s", arr.shape)
+            return
         
-        # Store (trajectory, start_step=0)
-        self._trajectories[env_idx] = (arr, 0)
-        logger_mp.info("ViewerPlus: set trajectory for env %d with %d frames", env_idx, arr.shape[0])
-
-    def reset_trajectory_playback(self) -> None:
-        """Reset trajectory playback to frame 0 for all environments."""
-        self._trajectory_step = 0
-        for env_idx in self._trajectories:
-            traj, _ = self._trajectories[env_idx]
-            self._trajectories[env_idx] = (traj, 0)
+        if arr.shape[0] != self.model.nq:
+            logger_mp.warning("add_ghost qpos length %d != model.nq %d", arr.shape[0], self.model.nq)
+            return
+        
+        self._ghost_qpos = arr.copy()
 
     def register_reward_terms(self, term_names: List[str]) -> None:
         """Register reward terms to be plotted.
@@ -185,52 +155,28 @@ class ViewerPlus:
         if not self.viewer:
             return
 
-        # Increment trajectory playback step
-        self._trajectory_step += 1
-
-        # clear previous debug geoms
+        # Clear previous debug geoms
         try:
             self.viewer.user_scn.ngeom = 0
         except Exception:
             pass
 
-        if self._show_ghost:
-            # 1. Render trajectory ghosts (if any)
-            for env_idx, (traj, start_step) in list(self._trajectories.items()):
-                frame_idx = (self._trajectory_step - start_step) % traj.shape[0]
-                qpos = traj[frame_idx]
-                try:
-                    self._viz_data.qpos[:] = qpos
-                    mujoco.mj_forward(self._ghost_model, self._viz_data)
-                    mujoco.mjv_addGeoms(
-                        self._ghost_model,
-                        self._viz_data,
-                        self._vopt,
-                        self._pert,
-                        self._catmask,
-                        self.viewer.user_scn,
-                    )
-                except Exception:
-                    logger_mp.exception("ViewerPlus: failed to add trajectory ghost for env %d", env_idx)
-            
-            # 2. Render per-frame ghosts (from add_ghost calls)
-            for (_env_idx, qpos) in self._ghost_list:
-                try:
-                    self._viz_data.qpos[:] = qpos
-                    mujoco.mj_forward(self._ghost_model, self._viz_data)
-                    mujoco.mjv_addGeoms(
-                        self._ghost_model,
-                        self._viz_data,
-                        self._vopt,
-                        self._pert,
-                        self._catmask,
-                        self.viewer.user_scn,
-                    )
-                except Exception:
-                    logger_mp.exception("ViewerPlus: failed to add per-frame ghost")
+        # Render ghost if enabled and qpos is set
+        if self._show_ghost and self._ghost_qpos is not None:
+            try:
+                self._viz_data.qpos[:] = self._ghost_qpos
 
-        # Reset per-frame ghost list (caller must re-add each frame if needed)
-        self._ghost_list.clear()
+                mujoco.mj_forward(self._ghost_model, self._viz_data)
+                mujoco.mjv_addGeoms(
+                    self._ghost_model,
+                    self._viz_data,
+                    self._vopt,
+                    self._pert,
+                    self._catmask,
+                    self.viewer.user_scn,
+                )
+            except Exception:
+                logger_mp.exception("ViewerPlus: failed to render ghost")
 
         # Reward plotting: render MjvFigures if enabled
         if self._show_reward and self._registered_reward_terms:

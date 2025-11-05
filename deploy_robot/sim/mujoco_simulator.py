@@ -334,7 +334,8 @@ class MujocoSimulator:
         for mapped_idx, orig_idx in enumerate(self._joint_mapping):
             if mapped_idx < len(tau):
                 full_tau[orig_idx] = tau[mapped_idx]
-        
+        print('full_tau:', full_tau)
+        print('tau:', tau)
         return full_tau
 
     def set_joint_commands(self, q, dq, trq, kp, kd):
@@ -622,46 +623,21 @@ class MujocoSimulator:
             return self._world_to_body_rot.T @ vector
 
     # --- ViewerPlus integration helpers ---
-    def add_ghost_trajectory(self, qpos: Any, env_idx: int = 0) -> None:
-        """Add a ghost pose or trajectory to the viewer if ViewerPlus is enabled.
-
-        qpos can be a 1D array (nq) or 2D array (timesteps, nq) or (num_envs, nq).
-        For simplicity we accept 1D or 2D and pick appropriate row when needed.
+    def add_ghost(self, qpos: np.ndarray) -> None:
+        """Add a ghost pose to the viewer if ViewerPlus is enabled.
+        
+        Following mjlab pattern: simple wrapper around viewer.add_ghost().
+        
+        Args:
+            qpos: 1D array (nq,) - full qpos for ghost rendering
         """
         if self.viewer is None:
             return
         try:
             if hasattr(self.viewer, "add_ghost"):
-                # If trajectory (2D), add last row as ghost pose for current frame
-                import numpy as _np
-                arr = _np.asarray(qpos)
-                if arr.ndim == 2:
-                    # try to select env_idx row if matches
-                    if arr.shape[0] == self.model.nq:
-                        # unlikely, treat as single
-                        pose = arr[0]
-                    elif arr.shape[0] > env_idx:
-                        pose = arr[env_idx]
-                    else:
-                        pose = arr[-1]
-                else:
-                    pose = arr
-                self.viewer.add_ghost(pose, env_idx=env_idx)
+                self.viewer.add_ghost(qpos)
         except Exception:
-            logger_mp.exception("add_ghost_trajectory failed")
-
-    def set_ghost_trajectory(self, trajectory: Any, env_idx: int = 0) -> None:
-        """Set a full trajectory for playback (ViewerPlus only).
-        
-        trajectory: shape (T, nq) - will be played back frame-by-frame aligned with sim steps
-        """
-        if self.viewer is None:
-            return
-        try:
-            if hasattr(self.viewer, "set_trajectory"):
-                self.viewer.set_trajectory(trajectory, env_idx=env_idx)
-        except Exception:
-            logger_mp.exception("set_ghost_trajectory failed")
+            logger_mp.exception("add_ghost failed")
 
     def register_reward_terms(self, term_names: List[str]) -> None:
         """Register custom reward terms for plotting (ViewerPlus only)."""

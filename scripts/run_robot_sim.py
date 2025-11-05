@@ -99,47 +99,46 @@ try:
         last_time = time.time()
 
         run_policy(policy, robot, time_step, logger)
-        
-        # If policy provides reference joint positions (joint_pos), forward them to the simulator viewer as ghosts
+
+        # Update ghost and track joint position data
+        ghost_joint_pos_mapped = None
         try:
             if hasattr(policy, "output_tensors") and "joint_pos" in policy.output_tensors:
-                import numpy as _np
+                # Extract policy's joint positions (reference trajectory)
+                policy_joint_pos = np.asarray(policy.output_tensors["joint_pos"])
+                if policy_joint_pos.ndim >= 2:
+                    policy_joint_pos = policy_joint_pos.squeeze(0)  # Remove batch dimension
                 
-                # Extract policy outputs
-                qref_joints = policy.output_tensors["joint_pos"]
-                if qref_joints.ndim >= 2:
-                    qref_joints = qref_joints.squeeze(0)
+                # Extract base pose from policy output
+                policy_body_pos_w = np.asarray(policy.output_tensors["body_pos_w"])  # (1, 14, 3)
+                policy_body_quat_w = np.asarray(policy.output_tensors["body_quat_w"])  # (1, 14, 4)
                 
-                # CRITICAL: Ghost pose must be in WORLD frame, NOT robot frame
-                # Extract base pose from policy output (world coordinates)
-                qpose_full = _np.zeros(env.simulator.data.qpos.shape)
+                # Use first body (index 0) as base pose
+                base_pos_policy = policy_body_pos_w[0, 0, :]  # (3,)
+                base_quat_policy = policy_body_quat_w[0, 0, :]  # (4,)
                 
-                if "body_pos_w" in policy.output_tensors and "body_quat_w" in policy.output_tensors:
-                    # Use policy's predicted world-frame base pose (correct approach, following mjlab)
-                    body_pos_w = policy.output_tensors["body_pos_w"]  # shape: (1, 14, 3)
-                    body_quat_w = policy.output_tensors["body_quat_w"]  # shape: (1, 14, 4)
+                # Construct full ghost qpos
+                current_qpos = env.simulator.data.qpos.copy()
+                ghost_qpos = np.zeros_like(current_qpos)
+                ghost_qpos[0:3] = base_pos_policy
+                ghost_qpos[3:7] = base_quat_policy
+                
+                # Map policy joint positions to MuJoCo/dof order using robot.joint2dof()
+                # This converts from policy/joint order to hardware/dof order
+                ghost_joint_pos_dof = robot.joint2dof(policy_joint_pos)
+                
+                # Assign to ghost_qpos
+                ghost_qpos[7:7+len(ghost_joint_pos_dof)] = ghost_joint_pos_dof
+                
+                # For tracking: store the mapped joint positions for visualization
+                ghost_joint_pos_mapped = ghost_joint_pos_dof.copy()
+                
+                # Send to viewer for rendering
+                if hasattr(env.simulator, "add_ghost"):
+                    env.simulator.add_ghost(ghost_qpos)
                     
-                    # Index 0 is typically the root/base body (pelvis)
-                    base_pos = body_pos_w[0, 0, :]  # (3,)
-                    base_quat = body_quat_w[0, 0, :]  # (4,)
-                    
-                    qpose_full[0:3] = base_pos  # world position
-                    qpose_full[3:7] = base_quat  # world quaternion (w,x,y,z)
-                else:
-                    # Fallback: if policy doesn't output base pose, use a fixed reference pose
-                    # (This should NOT happen with the current policy, but kept for safety)
-                    logger_mp.warning("Policy missing body_pos_w or body_quat_w - using fixed base pose for ghost")
-                    qpose_full[0:3] = [0, 0, 0.85]  # Fixed position above ground
-                    qpose_full[3:7] = [1, 0, 0, 0]  # Identity quaternion
-                
-                # Set joint positions from policy
-                qpose_full[7:7+len(qref_joints)] = qref_joints
-                
-                # Send to viewer
-                if hasattr(env.simulator, "add_ghost_trajectory"):
-                    env.simulator.add_ghost_trajectory(qpose_full)
         except Exception:
-            logger_mp.exception("Failed to push ghost pose to simulator viewer")
+            logger_mp.exception("Failed to update ghost")
         
         # Compute and update reward metrics
         try:
@@ -184,7 +183,6 @@ try:
         except Exception:
             logger_mp.exception("Failed to compute/update rewards")
         
-        logger_mp.debug(f"run one step cost time: {time.time()-last_time:.4f} sec")
         time_step += 1
 except KeyboardInterrupt:
     logger_mp.info("Control loop interrupted by user.")

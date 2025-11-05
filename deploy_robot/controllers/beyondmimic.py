@@ -69,7 +69,7 @@ def get_obs(policy: OnnxPolicy, robot: G1, time_step:int) -> np.ndarray:
 
     # Observation Names (Prog) ['command', 'projected_gravity', 'base_ang_vel', 'joint_pos', 'joint_vel', 'actions']
     # get reference motion from policy
-    policy.run_partial_inference(inputs={'obs': obs, 'time_step': np.array([[time_step]], dtype=np.float32)}, output_names=['joint_pos', 'joint_vel'])
+    policy.run_partial_inference(inputs={'obs': obs, 'time_step': np.array([[time_step]], dtype=np.float32)}, output_names=['joint_pos', 'joint_vel','body_pos_w', 'body_quat_w'])
     obs[0, 0:29] = policy.output_tensors["joint_pos"].squeeze(0).copy()
     obs[0, 29:58] = policy.output_tensors["joint_vel"].squeeze(0).copy()
 
