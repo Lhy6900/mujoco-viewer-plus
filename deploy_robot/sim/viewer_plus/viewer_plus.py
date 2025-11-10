@@ -128,7 +128,7 @@ class ViewerPlus:
                 logger_mp.info("ViewerPlus: toggle ghost (Ctrl+G) -> %s", self._show_ghost)
             else:
                 # Fallback: plain 'g' also works
-                # self._show_ghost = not self._show_ghost
+                self._show_ghost = not self._show_ghost
                 logger_mp.info("ViewerPlus: toggle ghost (g) -> %s", self._show_ghost)
             self._ctrl_pressed = False  # Reset after use
             

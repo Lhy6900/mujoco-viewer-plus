@@ -76,9 +76,6 @@ class G1RobotDDS(DDSObject):
         except Exception:
             logger_mp.exception("[%s] State publisher initialization failed", self.node_name)
             return False
-        except Exception:
-            logger_mp.exception("[%s] State publisher initialization failed", self.node_name)
-            return False
     
     def setup_subscriber(self) -> bool:
         """Setup the subscriber of the G1 robot"""

@@ -409,6 +409,13 @@ class MultiMujocoSimulator:
 
     def step(self):
         """Step the simulation, with decimation."""
+        # Apply viewer-controlled external forces to the current environment BEFORE stepping
+        # Note: xfrc_applied from viewer should be applied for the entire decimation cycle
+        if np.any(self.data.xfrc_applied != 0):
+            self.datalist[self._current_env_idx].xfrc_applied[:] = self.data.xfrc_applied[:]
+            # Clear viewer xfrc_applied after copying to prevent accumulation
+            self.data.xfrc_applied[:] = 0
+        
         # Run multiple physics steps according to decimation factor
         for _ in range(self.cfg.decimation):
             # Compute and apply control torques
@@ -421,15 +428,20 @@ class MultiMujocoSimulator:
                 # Compute and apply control torques
                 data.ctrl[:] = self.compute_multi_torque(torque_limitation=self.cfg.joint_config.torque_limits, env_idx=i)
                 
-                # Step physics
+                # Step physics (xfrc_applied will be used here)
                 mujoco.mj_step(self.model, data)
         
+        # Clear external forces after all decimation steps are done
+        # (forces should only last for one control cycle)
+        for i in range(self.num_envs):
+            self.datalist[i].xfrc_applied[:] = 0
+        
+        # Copy current environment state to viewer data
         self.data.qpos[:] = self.datalist[self._current_env_idx].qpos[:]
         self.data.qvel[:] = self.datalist[self._current_env_idx].qvel[:]
         self.data.ctrl[:] = self.datalist[self._current_env_idx].ctrl[:]
         mujoco.mj_forward(self.model, self.data)
-        if np.any(self.data.xfrc_applied != 0):
-                self.datalist[self._current_env_idx].xfrc_applied[:] = self.data.xfrc_applied[:]
+        
         # Update state after all physics steps
         self.update_state()
         self.update_multi_state()

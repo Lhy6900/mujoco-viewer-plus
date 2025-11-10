@@ -61,10 +61,9 @@ class G1(RobotBase):
         if self.cfg.env == 'real':
             ChannelFactoryInitialize(0, self.cfg.network_interface)
         elif self.cfg.env == 'sim':
-            # Use configured domain ID for multi-environment support
-            # ChannelFactoryInitialize(self.cfg.dds_domain_id)     # simulation will use configured domain ID
-            from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelFactory
-            self.factory: ChannelFactory = ChannelFactoryInitialize(self.cfg.dds_domain_id)
+            # In sim mode, DDS is handled by g1_robot_dds.py
+            # We don't need to initialize ChannelFactory here
+            pass
 
 
         # prepare hardware interface components
