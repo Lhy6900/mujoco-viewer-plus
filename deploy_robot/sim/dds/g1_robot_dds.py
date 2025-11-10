@@ -20,35 +20,62 @@ logger_mp = logging_mp.get_logger(__name__)
 class G1RobotDDS(DDSObject):
     """G1 robot DDS communication class - singleton pattern"""
     
-    def __init__(self, node_name: str = "g1_robot"):
-        """Initialize the G1 robot DDS node"""
+    def __init__(self, node_name: str = "g1_robot", dds_domain_id: int = 0):
+        """Initialize the G1 robot DDS node
+        
+        Args:
+            node_name: Name of the DDS node
+            dds_domain_id: DDS domain ID for multi-environment support
+        """
         # avoid duplicate initialization
-        if hasattr(self, '_initialized'):
-            return
+        # if hasattr(self, '_initialized'):
+        #     return
             
         super().__init__()
         self.node_name = node_name
+        self.dds_domain_id = dds_domain_id
         self.crc = CRC()
         self.low_state = unitree_hg_msg_dds__LowState_()
         self._initialized = True
-        
-        # setup the shared memory
+
+        # setup the shared memory with unique names per environment
         self.setup_shared_memory(
-            input_shm_name="isaac_robot_state",  # read the state of the G1 robot from Isaac Lab
-            output_shm_name="dds_robot_cmd",  # output the command to Isaac Lab
+            input_shm_name=f"isaac_robot_state_{self.node_name}",  # unique per environment
+            output_shm_name=f"dds_robot_cmd_{self.node_name}",  # unique per environment
             input_size=3072,
-            output_size=3072  # output the command to Isaac Lab
+            output_size=3072
         )
         
-        logger_mp.info("[%s] G1 robot DDS node initialized", self.node_name)
+        logger_mp.info("[%s] G1 robot DDS node initialized with unique shared memory", self.node_name)
     
     def setup_publisher(self) -> bool:
         """Setup the publisher of the G1 robot"""
         try:
-            self.publisher = ChannelPublisher("rt/lowstate", LowState_)
-            self.publisher.Init()
-            logger_mp.info("[%s] State publisher initialized (rt/lowstate)", self.node_name)
+            from cyclonedds.domain import Domain, DomainParticipant
+            from cyclonedds.topic import Topic
+            from cyclonedds.pub import DataWriter
+            from unitree_sdk2py.core.channel_config import ChannelConfigAutoDetermine
+            
+            # 使用共享的 domain 0，但用不同的 topic 名称区分环境
+            # CycloneDDS 不允许同一进程多个 Domain 实例
+            if not hasattr(G1RobotDDS, '_shared_domain'):
+                G1RobotDDS._shared_domain = Domain(0, ChannelConfigAutoDetermine)
+                G1RobotDDS._shared_participant = DomainParticipant(0)
+            
+            self.participant = G1RobotDDS._shared_participant
+            
+            # 使用带环境 ID 的 topic 名称实现隔离
+            # 直接使用 dds_domain_id 来生成唯一的 topic 名称
+            topic_name = f"rt/lowstate_env{self.dds_domain_id}"
+            topic = Topic(self.participant, topic_name, LowState_)
+            self.publisher = DataWriter(self.participant, topic)
+            
+            logger_mp.info("[%s] State publisher initialized (%s)", 
+                          self.node_name, topic_name)
             return True
+        except Exception:
+            logger_mp.exception("[%s] State publisher initialization failed", self.node_name)
+            return False
         except Exception:
             logger_mp.exception("[%s] State publisher initialization failed", self.node_name)
             return False
@@ -56,13 +83,42 @@ class G1RobotDDS(DDSObject):
     def setup_subscriber(self) -> bool:
         """Setup the subscriber of the G1 robot"""
         try:
-            logger_mp.debug("[%s] Create ChannelSubscriber...", self.node_name)
-            self.subscriber = ChannelSubscriber("rt/lowcmd", LowCmd_)
-            self.subscriber.Init(lambda msg: self.dds_subscriber(msg, ""), 32)
+            from cyclonedds.topic import Topic
+            from cyclonedds.sub import DataReader
+            from cyclonedds.core import Listener
+            
+            # 使用已创建的共享 participant
+            # 使用带环境 ID 的 topic 名称实现隔离
+            # 直接使用 dds_domain_id 来生成唯一的 topic 名称
+            topic_name = f"rt/lowcmd_env{self.dds_domain_id}"
+            topic = Topic(self.participant, topic_name, LowCmd_)
+            
+            # 创建带回调的 DataReader
+            self.subscriber = DataReader(
+                self.participant, 
+                topic,
+                listener=Listener(on_data_available=self._on_command_received)
+            )
+            
+            logger_mp.info("[%s] Command subscriber initialized (%s)", 
+                          self.node_name, topic_name)
             return True
         except Exception:
             logger_mp.exception("[%s] Command subscriber initialization failed", self.node_name)
             return False
+    
+    def _on_command_received(self, reader):
+        """Callback when command data is available"""
+        try:
+            # 读取所有可用的样本
+            samples = reader.take(N=1)  # 每次读取1个最新样本
+            if samples:
+                for sample in samples:
+                    # 简单检查：如果 sample 有 crc 属性，就认为是有效的
+                    if hasattr(sample, 'crc'):
+                        self.dds_subscriber(sample, "")
+        except Exception:
+            logger_mp.exception("[%s] Error in command callback", self.node_name)
     
     def dds_publisher(self) -> Any:
         """Convert Isaac Lab state to DDS message and publish."""
@@ -98,7 +154,8 @@ class G1RobotDDS(DDSObject):
 
             self.low_state.tick += 1
             self.low_state.crc = self.crc.Crc(self.low_state)
-            self.publisher.Write(self.low_state)
+            # 使用底层 DDS API 的 write 方法（小写）
+            self.publisher.write(self.low_state)
 
         except Exception:
             logger_mp.exception("[%s] Error processing publish data", self.node_name)
@@ -172,6 +229,9 @@ class G1RobotDDS(DDSObject):
                 "joint_torques": joint_torques.tolist() if hasattr(joint_torques, 'tolist') else joint_torques,
                 "imu_data": imu_data.tolist() if hasattr(imu_data, 'tolist') else imu_data
             }
+            # print(f'G1ROBOTDDS-write_robot_state- node_name={self.node_name}, self.dds_id={self.dds_domain_id},joint_positions={state_data["joint_positions"][:3]}, '
+            #       f'joint_velocities={state_data["joint_velocities"][:3]}, joint_torques={state_data["joint_torques"][:3]}, '
+            #       f'imu_data={state_data["imu_data"][:3]}')
             self.input_shm.write_data(state_data)
         except Exception:
             logger_mp.exception("[%s] Error writing robot state", self.node_name)

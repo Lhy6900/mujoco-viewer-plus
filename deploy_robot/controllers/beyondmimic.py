@@ -1,5 +1,5 @@
 import numpy as np
-
+import time
 from deploy_robot.policies.onnx_policy import OnnxPolicy
 from deploy_robot.g1.g1 import G1, G1Config
 from deploy_robot.utils.writer import SimpleWriter
@@ -19,6 +19,7 @@ def make_robot(config: dict, env: str = 'real') -> G1:
         joint_kps=config["joint_stiffness"],
         joint_kds=config["joint_damping"],
         default_joint_pos=config["default_joint_pos"],
+        dds_domain_id=config.get("dds_domain_id", 1),  # Default to domain 1 for backward compatibility
     )
     robot = G1(robot_cfg)
     return robot
@@ -34,7 +35,7 @@ def run_policy(policy: OnnxPolicy, robot: G1, time_step: int, logger: SimpleWrit
     Returns:
         list: The outputs from the model inference.
     """
-    
+
     # a. get observation
     robot.update_state()
     # b. get action from policy
@@ -59,8 +60,7 @@ def run_policy(policy: OnnxPolicy, robot: G1, time_step: int, logger: SimpleWrit
         logger.log('yaw',              robot.base_rpy[2])  
         logger.log('projected_gravity',robot.projected_gravity)
         logger.log('timestep',       time_step)
-
-
+        
 def get_obs(policy: OnnxPolicy, robot: G1, time_step:int) -> np.ndarray:
     obs = np.zeros((1, policy.get_observation_size()), dtype=np.float32)
 

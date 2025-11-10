@@ -46,6 +46,7 @@ class MujocoSimulatorConfig:
     robot_type: str = "generic"  # Identifier for robot type (go1, a1, etc.)
     headless: bool = True
     decimation: int = 4  # Run N iterations of simulation every step
+    num_envs: int = 1  # Number of parallel environments
     dt: float = 0.005  # Simulation timestep
     root_body_name: Optional[str] = None  # Optional explicit root body name
     joint_config: JointConfig = field(default_factory=JointConfig)  # May be None for standard robots
@@ -53,10 +54,9 @@ class MujocoSimulatorConfig:
     # Viewer options
     viewer_type: str = "native"  # "native" or "viewer_plus"
     viewer_plus_config: Optional[dict] = None
-    num_envs: int = 1
 
 
-class MujocoSimulator:
+class MultiMujocoSimulator:
     """MuJoCo simulator that is completely independent from ROS."""
     
     def __init__(self, config: Union[MujocoSimulatorConfig, Dict[str, Any]]):
@@ -81,7 +81,9 @@ class MujocoSimulator:
         self.model = mujoco.MjModel.from_xml_path(Path(self.cfg.xml_path).as_posix())
         self.model.opt.timestep = self.cfg.dt
         self.data = mujoco.MjData(self.model)
-        
+        if self.cfg.num_envs > 1:
+            self.datalist = [mujoco.MjData(self.model) for _ in range(self.cfg.num_envs)]
+
         # Viewer setup: support native viewer or viewer_plus
         self.viewer = None
         if not self.cfg.headless:
@@ -135,6 +137,25 @@ class MujocoSimulator:
         
         # Initialize state
         self.update_state()
+        
+        # For multi-env: initialize per-environment lag buffers
+        if self.cfg.num_envs > 1:
+            self.lag_buffer_list = []
+            num_dofs = len(self._joint_names)
+            neutral_cmd = {
+                "q": np.zeros(num_dofs),
+                "dq": np.zeros(num_dofs),
+                "trq": np.zeros(num_dofs),
+                "kp": np.zeros(num_dofs),
+                "kd": np.zeros(num_dofs),
+            }
+            
+            for i in range(self.cfg.num_envs):
+                if self.cfg.hardware_sim and self.cfg.hardware_sim.lag_steps > 0:
+                    self.lag_buffer_list.append([dict(neutral_cmd) for _ in range(self.cfg.hardware_sim.lag_steps + 1)])
+                else:
+                    # Even without lag, we need at least one buffer entry
+                    self.lag_buffer_list.append([dict(neutral_cmd)])
     
     def _setup_joint_mapping(self):
         """Set up joint mapping based on configuration."""
@@ -334,6 +355,8 @@ class MujocoSimulator:
         for mapped_idx, orig_idx in enumerate(self._joint_mapping):
             if mapped_idx < len(tau):
                 full_tau[orig_idx] = tau[mapped_idx]
+        print('full_tau:', full_tau)
+        print('tau:', tau)
         return full_tau
 
     def set_joint_commands(self, q, dq, trq, kp, kd):
@@ -388,6 +411,111 @@ class MujocoSimulator:
         else:
             # No lag - directly set current command
             self.lag_buffer = [new_cmd]
+
+    def set_joint_commands_multi(self, env_idx: int, q, dq, trq, kp, kd):
+        """Set joint commands for a specific environment (multi-env mode)."""
+        if self.cfg.num_envs <= 1:
+            # Fall back to single-env method
+            return self.set_joint_commands(q, dq, trq, kp, kd)
+        
+        if env_idx < 0 or env_idx >= self.cfg.num_envs:
+            raise ValueError(f"Invalid env_idx {env_idx}, must be 0 to {self.cfg.num_envs-1}")
+        
+        # Normalize inputs to 1D float arrays
+        q   = np.asarray(q, dtype=np.float32).ravel()
+        dq  = np.asarray(dq, dtype=np.float32).ravel()
+        trq = np.asarray(trq, dtype=np.float32).ravel()
+        kp  = np.asarray(kp, dtype=np.float32).ravel()
+        kd  = np.asarray(kd, dtype=np.float32).ravel()
+        
+        if q.size >= len(self._joint_names):
+            q = q[:len(self._joint_names)]
+            dq = dq[:len(self._joint_names)]
+            trq = trq[:len(self._joint_names)]
+            kp = kp[:len(self._joint_names)]
+            kd = kd[:len(self._joint_names)]
+        else:
+            raise ValueError("q length mismatch")
+
+        # Apply joint limits if configured
+        if (self.cfg.joint_config and 
+            self.cfg.joint_config.joint_limits_min is not None and 
+            self.cfg.joint_config.joint_limits_max is not None):
+            try:
+                limits_min = np.array(self.cfg.joint_config.joint_limits_min)
+                limits_max = np.array(self.cfg.joint_config.joint_limits_max)
+                
+                if len(limits_min) >= len(q) and len(limits_max) >= len(q):
+                    q = np.clip(q, limits_min[:len(q)], limits_max[:len(q)])
+            except Exception as e:
+                logger_mp.warning(f"Warning: Could not apply joint limits: {e}")
+        
+        # Create new command
+        new_cmd = {
+            "q": q.copy(), 
+            "dq": dq.copy(), 
+            "trq": trq.copy(), 
+            "kp": kp.copy(), 
+            "kd": kd.copy()
+        }
+        
+        # Initialize lag buffer if it doesn't exist
+        if self.lag_buffer_list[env_idx] is None:
+            self.lag_buffer_list[env_idx] = [new_cmd]
+            return
+        
+        # Update lag buffer based on lag configuration
+        if self.cfg.hardware_sim and self.cfg.hardware_sim.lag_steps > 0:
+            # Push new command to the end of the buffer
+            self.lag_buffer_list[env_idx] = self.lag_buffer_list[env_idx][1:] + [new_cmd]
+        else:
+            # No lag - directly set current command
+            self.lag_buffer_list[env_idx] = [new_cmd]
+    
+    def compute_torque_multi(self, env_idx: int, torque_limitation=None):
+        """Compute joint control torques for a specific environment using PD control."""
+        if self.cfg.num_envs <= 1:
+            return self.compute_torque(torque_limitation)
+        
+        if env_idx < 0 or env_idx >= self.cfg.num_envs:
+            raise ValueError(f"Invalid env_idx {env_idx}")
+        
+        # Get current unmapped joint state from this environment's data
+        data_i = self.datalist[env_idx]
+        q_all = data_i.qpos[7:].copy()
+        dq_all = data_i.qvel[6:].copy()
+        
+        if not self.lag_buffer_list[env_idx]:
+            # No commands available
+            return np.zeros(len(self._joint_names_orig))
+            
+        # Get commands from lag buffer
+        cmd = self.lag_buffer_list[env_idx][0]
+        target_q = cmd["q"]
+        target_dq = cmd["dq"]
+        target_trq = cmd["trq"]
+        target_kp = cmd["kp"]
+        target_kd = cmd["kd"]
+        
+        # Get current mapped joint state
+        q = np.array([q_all[i] for i in self._joint_mapping])
+        dq = np.array([dq_all[i] for i in self._joint_mapping])
+        
+        # Calculate PD control torque
+        tau = target_trq + target_kp * (target_q - q) + target_kd * (target_dq - dq)
+        
+        # Apply torque limits if specified
+        if torque_limitation is not None:
+            torque_limitation = np.array(torque_limitation)
+            tau = np.clip(tau, -torque_limitation, torque_limitation)
+        
+        # Map torques back to full joint array
+        full_tau = np.zeros(len(self._joint_names_orig))
+        for mapped_idx, orig_idx in enumerate(self._joint_mapping):
+            if mapped_idx < len(tau):
+                full_tau[orig_idx] = tau[mapped_idx]
+        
+        return full_tau
 
     def reset(self, joint_positions=None, base_position=None, base_orientation=None):
         """Reset the simulator state.

@@ -26,6 +26,7 @@ class G1Config(RobotBaseConfig):
     # default value
     network_interface: str | None = None
     mode: Mode = Mode.PR
+    dds_domain_id: int = 1  # DDS domain ID for multi-environment support (sim only)
 
 class G1(RobotBase):
     """G1 29 dof robot interface
@@ -60,7 +61,11 @@ class G1(RobotBase):
         if self.cfg.env == 'real':
             ChannelFactoryInitialize(0, self.cfg.network_interface)
         elif self.cfg.env == 'sim':
-            ChannelFactoryInitialize(1)     # simulation will use channel 1
+            # Use configured domain ID for multi-environment support
+            # ChannelFactoryInitialize(self.cfg.dds_domain_id)     # simulation will use configured domain ID
+            from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelFactory
+            self.factory: ChannelFactory = ChannelFactoryInitialize(self.cfg.dds_domain_id)
+
 
         # prepare hardware interface components
         self.joystick = Joystick()
@@ -106,6 +111,8 @@ class G1(RobotBase):
         Returns:
             None
         """
+        start_time = time.time()
+        print(f"[{type(self).__name__}] Starting robot communication...")
         # close motion controller
         if self.cfg.env == 'real':
             self.msc = MotionSwitcherClient()
@@ -118,32 +125,118 @@ class G1(RobotBase):
                 status, result = self.msc.CheckMode()
                 time.sleep(1)
 
-        # create publisher #
-        self.lowcmd_publisher_ = ChannelPublisher("rt/lowcmd", LowCmd_)
-        self.lowcmd_publisher_.Init()
+        # create publisher and subscriber using底层 CycloneDDS API
+        if self.cfg.env == 'sim':
+            from cyclonedds.domain import Domain, DomainParticipant
+            from cyclonedds.topic import Topic
+            from cyclonedds.pub import DataWriter
+            from cyclonedds.sub import DataReader
+            from cyclonedds.core import Listener
+            from unitree_sdk2py.core.channel_config import ChannelConfigAutoDetermine
+            
+            # 导入 G1RobotDDS 以共享其 Domain（避免重复创建）
+            from deploy_robot.sim.dds.g1_robot_dds import G1RobotDDS
+            
+            # 使用 G1RobotDDS 已创建的共享 domain
+            # 如果还没创建，则创建之
+            if not hasattr(G1RobotDDS, '_shared_domain'):
+                G1RobotDDS._shared_domain = Domain(0, ChannelConfigAutoDetermine)
+                G1RobotDDS._shared_participant = DomainParticipant(0)
+            
+            self.participant = G1RobotDDS._shared_participant
+            
+            # 使用环境特定的 topic 名称
+            # 根据 dds_domain_id 生成唯一的 topic 名称
+            robot_suffix = f"env{self.cfg.dds_domain_id}"
+            cmd_topic_name = f"rt/lowcmd_{robot_suffix}"
+            state_topic_name = f"rt/lowstate_{robot_suffix}"
+            
+            # 创建 publisher（用于发送命令）
+            cmd_topic = Topic(self.participant, cmd_topic_name, LowCmd_)
+            self.lowcmd_publisher_ = DataWriter(self.participant, cmd_topic)
+            
+            # 创建 subscriber（用于接收状态）
+            state_topic = Topic(self.participant, state_topic_name, LowState_)
+            self.lowstate_subscriber = DataReader(
+                self.participant,
+                state_topic,
+                listener=Listener(on_data_available=self._on_lowstate_available)
+            )
 
-        # create subscriber #
-        self.lowstate_subscriber = ChannelSubscriber("rt/lowstate", LowState_)
-        self.lowstate_subscriber.Init(self._lowstate_handler, 10)
+        else:
+            # 实体机器人使用原来的 ChannelFactory 方式
+            self.lowcmd_publisher_ = self.factory.CreateChannel("rt/lowcmd", LowCmd_)
+            self.lowcmd_publisher_.SetWriter()
+            
+            self.lowstate_subscriber = self.factory.CreateChannel("rt/lowstate", LowState_)
+            self.lowstate_subscriber.SetReader(self._lowstate_handler, 10)
 
         while self.low_state is None:
-            time.sleep(0.1) 
+            time.sleep(0.01)  # Reduced sleep time for faster startup
             logger_mp.warning(f"[{type(self).__name__}] Waiting to subscribe dds...")
         logger_mp.info(f"[{type(self).__name__}] Robot communication started.")
 
         self.enable_motor = True
         self.enable_control = True
+        
+        # Immediately send a holding command to prevent free-fall
+        # This keeps the robot at its current position with moderate stiffness
+        logger_mp.info(f"[{type(self).__name__}] Sending initial holding command...")
+        self.update_state()  # Get current state first
+        initial_hold_kp = np.full(G1_NUM_MOTOR, 100.0)  # Moderate stiffness
+        initial_hold_kd = np.full(G1_NUM_MOTOR, 5.0)    # Moderate damping
+        
+        # Temporarily override kp/kd for initial hold
+        orig_kp = self.dof_kp.copy()
+        orig_kd = self.dof_kd.copy()
+        self.dof_kp = initial_hold_kp
+        self.dof_kd = initial_hold_kd
+        
+        # Send holding command at current position
+        self._send_motor_cmd(target_q=self.dof_pos)
+        
+        # Restore original gains
+        self.dof_kp = orig_kp
+        self.dof_kd = orig_kd
+        
+        end_time = time.time()
+        print(f"[{type(self).__name__}] Robot communication startup time: {end_time - start_time:.3f} seconds.")
 
     def stop_communication(self):
         if self.cfg.env == 'real':
             if self.lowstate_subscriber is not None:
-                self.lowstate_subscriber.Close()
+                # self.lowstate_subscriber.Close()
+                self.lowstate_subscriber.CloseReader()
             if self.lowcmd_publisher_ is not None:
-                self.lowcmd_publisher_.Close()
+                # self.lowcmd_publisher_.Close()
+                self.lowcmd_publisher_.CloseWriter()
+        else:
+            # 仿真环境下，CycloneDDS 的 DataReader/DataWriter 会自动清理
+            # 但建议显式删除以确保资源释放
+            if hasattr(self, 'lowstate_subscriber'):
+                del self.lowstate_subscriber
+            if hasattr(self, 'lowcmd_publisher_'):
+                del self.lowcmd_publisher_
+            if hasattr(self, 'participant'):
+                del self.participant
+            if hasattr(self, 'domain'):
+                del self.domain
 
         self.enable_motor = False
         self.enable_control = False
         logger_mp.info(f"[{type(self).__name__}] Robot communication stopped.")
+
+    def _on_lowstate_available(self, reader):
+        """Callback when lowstate data is available (for CycloneDDS API)"""
+        try:
+            samples = reader.take(N=1)
+            if samples:
+                for sample in samples:
+                    # 简单检查：如果 sample 有 imu_state 属性，就认为是有效的
+                    if hasattr(sample, 'imu_state'):
+                        self._lowstate_handler(sample)
+        except Exception:
+            logger_mp.exception("Error in lowstate callback")
 
     def _lowstate_handler(self, msg: LowState_):
         """
@@ -153,7 +246,12 @@ class G1(RobotBase):
         Returns:
             None
         """
-        self.low_state = msg
+        import copy
+        if self.low_state is None:
+            self.low_state = copy.deepcopy(msg)  # 首次初始化
+        else:
+            # 每次都深拷贝,确保完全隔离
+            self.low_state = copy.deepcopy(msg)
 
         if not self.update_mode_machine_:
             self.mode_machine_ = self.low_state.mode_machine
@@ -190,7 +288,11 @@ class G1(RobotBase):
                 self.low_cmd.motor_cmd[i].kd = 0
 
         self.low_cmd.crc = self.crc.Crc(self.low_cmd)
-        self.lowcmd_publisher_.Write(self.low_cmd)
+        # 使用小写 write() 方法（CycloneDDS API）
+        if self.cfg.env == 'sim':
+            self.lowcmd_publisher_.write(self.low_cmd)
+        else:
+            self.lowcmd_publisher_.Write(self.low_cmd)
 
     def update_joystick(self):
         """Update joystick state."""
@@ -202,7 +304,7 @@ class G1(RobotBase):
         - Joint encoders
         - Joystick
         """
-        ### base imu
+        ### base 
         q = self.low_state.imu_state.quaternion  # wxyz
         self.base_quat = np.array([q[1], q[2], q[3], q[0]])  # turn to xyzw
         self.base_rpy = np.array(self.low_state.imu_state.rpy)

@@ -59,9 +59,13 @@ class DDSManager:
             return True
         
         try:
-            ChannelFactoryInitialize(1)
+            # NOTE: Do NOT call ChannelFactoryInitialize here!
+            # In multi-environment mode, each G1RobotDDS instance will initialize
+            # its own ChannelFactory with a specific domain_id.
+            # Global initialization here would override those domain_id settings.
+            # ChannelFactoryInitialize(1)  # DISABLED for multi-env support
             self.dds_initialized = True
-            logger_mp.info("DDS system initialized")
+            logger_mp.info("DDS system initialized (skipping global ChannelFactory init)")
             return True
         except Exception:
             logger_mp.exception("DDS system initialization failed")
@@ -184,6 +188,7 @@ class DDSManager:
                 obj.setup_publisher()
                 obj.publishing = True
                 self._pub_list.append(name)
+                print('DDS-MANAGER:PUBLISH NAME:', name)
         self.publishing_running = True
         self.publish_thread = threading.Thread(target=self._publish_loop, daemon=True)
         self.publish_thread.start()

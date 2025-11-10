@@ -10,6 +10,9 @@ from enum import Enum
 import logging_mp
 logger_mp = logging_mp.get_logger(__name__)
 
+# Import MujocoSimulatorConfig for type checking
+from deploy_robot.sim.mujoco_simulator import MujocoSimulatorConfig
+
 class ReferenceFrame(Enum):
     """Reference frame options."""
     WORLD = "world"  # World/global frame
@@ -40,7 +43,7 @@ class HardwareSimConfig:
 
 
 @dataclass
-class MujocoSimulatorConfig:
+class MultiMujocoSimulatorConfig:
     """Configuration for MuJoCo simulator."""
     xml_path: str
     robot_type: str = "generic"  # Identifier for robot type (go1, a1, etc.)
@@ -56,11 +59,18 @@ class MujocoSimulatorConfig:
     num_envs: int = 1
 
 
-class MujocoSimulator:
+class MultiMujocoSimulator:
     """MuJoCo simulator that is completely independent from ROS."""
     
-    def __init__(self, config: Union[MujocoSimulatorConfig, Dict[str, Any]]):
-        """Initialize MuJoCo simulator with configuration."""
+    def __init__(self, config: Union[MujocoSimulatorConfig, MultiMujocoSimulatorConfig, Dict[str, Any]]):
+        """Initialize MuJoCo simulator with configuration.
+        
+        Args:
+            config: Can be either:
+                - MujocoSimulatorConfig (from mujoco_simulator.py)
+                - MultiMujocoSimulatorConfig (from this file)
+                - dict that will be converted to MultiMujocoSimulatorConfig
+        """
         # Convert dict config to proper config object
         if isinstance(config, dict):
             # Handle joint config
@@ -71,17 +81,22 @@ class MujocoSimulator:
             if "hardware_sim" in config and isinstance(config["hardware_sim"], dict):
                 config["hardware_sim"] = HardwareSimConfig(**config["hardware_sim"])
             
-            self.cfg = MujocoSimulatorConfig(**config)
-        elif isinstance(config, MujocoSimulatorConfig):
+            self.cfg = MultiMujocoSimulatorConfig(**config)
+        elif isinstance(config, (MujocoSimulatorConfig, MultiMujocoSimulatorConfig)):
+            # Accept both MujocoSimulatorConfig and MultiMujocoSimulatorConfig
             self.cfg = config
         else:
-            raise ValueError("Invalid configuration type for MujocoSimulator")
-            
+            raise ValueError(
+                f"Invalid configuration type for MultiMujocoSimulator: {type(config).__name__}. "
+                f"Expected MujocoSimulatorConfig, MultiMujocoSimulatorConfig, or dict."
+            )
+        self.num_envs = self.cfg.num_envs
         # Initialize MuJoCo
         self.model = mujoco.MjModel.from_xml_path(Path(self.cfg.xml_path).as_posix())
         self.model.opt.timestep = self.cfg.dt
         self.data = mujoco.MjData(self.model)
-        
+        self.datalist = [mujoco.MjData(self.model) for _ in range(self.num_envs)]
+        self._current_env_idx = 0
         # Viewer setup: support native viewer or viewer_plus
         self.viewer = None
         if not self.cfg.headless:
@@ -99,7 +114,7 @@ class MujocoSimulator:
                     self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
             else:
                 self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
-        
+
         # Get all joints from model (excluding world joint)
         self._joint_names_orig = [
             mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, i) 
@@ -126,15 +141,31 @@ class MujocoSimulator:
         self._tar_dof_pos = None
         self._dof_vel = None
         self._dof_trq = np.zeros(len(self._joint_names_orig))
-        
-        # Setup control lag buffer if needed
+        # Initialize state variables lists
+        self._world_to_body_rot_list = [np.eye(3) for _ in range(self.num_envs)]
+        self._pos_world_list = [None for _ in range(self.num_envs)] 
+        self._quat_world_list = [None for _ in range(self.num_envs)]
+        self._lin_vel_world_list = [None for _ in range(self.num_envs)]
+        self._ang_vel_body_list = [None for _ in range(self.num_envs)]
+        self._ang_vel_world_list = [None for _ in range(self.num_envs)]
+        self._lin_vel_body_list = [None for _ in range(self.num_envs)]
+        self._lin_acc_world_list = [None for _ in range(self.num_envs)]
+        self._dof_pos_list = [None for _ in range(self.num_envs)]
+        self._tar_dof_pos_list = [None for _ in range(self.num_envs)]
+        self._dof_vel_list = [None for _ in range(self.num_envs)]
+        self._dof_trq_list = [np.zeros(len(self._joint_names_orig)) for _ in range(self.num_envs)]
+
+        # Setup control lag buffer and list if needed
         self._setup_lag_buffer()
+        self._setup_multilag_buffer()
         
-        # Set initial joint positions if specified
+        # Set initial joint positions if specified, 这个应该是ai改的，实际上不会调用这个。
         self._set_initial_positions()
+        self._set_multi_initial_positions()
         
         # Initialize state
         self.update_state()
+        self.update_multi_state()
     
     def _setup_joint_mapping(self):
         """Set up joint mapping based on configuration."""
@@ -171,17 +202,60 @@ class MujocoSimulator:
         }
         self.lag_buffer = [dict(neutral_cmd) for _ in range(self.cfg.hardware_sim.lag_steps + 1)]
     
+    def _setup_multilag_buffer(self):
+        """Set up control lag buffer list."""
+        if not self.cfg.hardware_sim or self.cfg.hardware_sim.lag_steps <= 0:
+            self.lag_buffer_list = [None for _ in range(self.num_envs)]
+            return
+        
+        # Initialize lag buffer with neutral commands
+        # Create independent lag_buffer for each environment to avoid shallow copy issue
+        num_dofs = len(self._joint_names)
+        neutral_cmd = {
+            "q": np.zeros(num_dofs),
+            "dq": np.zeros(num_dofs),
+            "trq": np.zeros(num_dofs),
+            "kp": np.zeros(num_dofs),
+            "kd": np.zeros(num_dofs),
+        }
+        # Create a new independent list for each environment
+        self.lag_buffer_list = [
+            [dict(neutral_cmd) for _ in range(self.cfg.hardware_sim.lag_steps + 1)]
+            for _ in range(self.num_envs)
+        ]
+
     def _set_initial_positions(self):
         """Set initial joint positions if specified in config."""
         if not self.cfg.joint_config or not self.cfg.joint_config.default_positions:
             return
-            
         default_pos = self.cfg.joint_config.default_positions
         for mapped_idx, orig_idx in enumerate(self._joint_mapping):
             if mapped_idx < len(default_pos):
                 self.data.qpos[7 + orig_idx] = default_pos[mapped_idx]
                 
         mujoco.mj_forward(self.model, self.data)
+        if self.viewer and self.viewer.is_running():
+            self.viewer.sync()
+
+    def _set_multi_initial_positions(self):
+        """Set initial joint positions for multiple environments if specified in config."""
+        robot_spacing = 2.0  # 机器人之间的间距，可以根据需要调整
+        
+        for env_idx, data in enumerate(self.datalist):
+            # Set different x position for each environment
+            # Environment 0 at x=0, Environment 1 at x=2.0, Environment 2 at x=4.0, etc.
+            data.qpos[0] = env_idx * robot_spacing  # x position
+            data.qpos[1] = 0.0  # y position (keep all robots at y=0)
+        if not self.cfg.joint_config or not self.cfg.joint_config.default_positions:
+            return
+            
+        default_pos = self.cfg.joint_config.default_positions
+        for data in self.datalist:
+            for mapped_idx, orig_idx in enumerate(self._joint_mapping):
+                if mapped_idx < len(default_pos):
+                    data.qpos[7 + orig_idx] = default_pos[mapped_idx]
+                    
+            mujoco.mj_forward(self.model, data)
         if self.viewer and self.viewer.is_running():
             self.viewer.sync()
     
@@ -248,7 +322,43 @@ class MujocoSimulator:
         # Apply sensor noise if configured
         if self.cfg.hardware_sim and self.cfg.hardware_sim.add_noise:
             self._apply_sensor_noise()
+
+
+    def update_multi_state(self):
+        """Update internal state from MuJoCo data for multiple environments."""
+        for i in range(self.num_envs):
+            data = self.datalist[i]
+            # Get base state
+            self._pos_world_list[i] = data.qpos[0:3].copy()
+            self._quat_world_list[i] = data.qpos[3:7].copy()      # [w,x,y,z] format
+            self._lin_vel_world_list[i] = data.qvel[0:3].copy()   # World frame
+            self._ang_vel_body_list[i] = data.qvel[3:6].copy()    # Body frame
+            
+            # Update rotation matrix from quaternion
+            self._world_to_body_rot_list[i] = self._quaternion_to_rotation_matrix(self._quat_world_list[i])
+            
+            # Transform velocities between frames
+            self._lin_vel_body_list[i] = self._world_to_body_rot_list[i].T @ self._lin_vel_world_list[i]
+            self._ang_vel_world_list[i] = self._world_to_body_rot_list[i] @ self._ang_vel_body_list[i]
+            
+            # Linear acceleration
+            self._lin_acc_world_list[i] = data.qacc[0:3].copy() if hasattr(data, 'qacc') else np.zeros(3)
+            
+            # Joint states with remapping
+            dof_pos_all = data.qpos[7:].copy()
+            dof_vel_all = data.qvel[6:].copy()
+            
+            # Apply remapping
+            self._dof_pos_list[i] = np.array([dof_pos_all[j] for j in self._joint_mapping])
+            self._dof_vel_list[i] = np.array([dof_vel_all[j] for j in self._joint_mapping])
+            
+        # Apply sensor noise if configured
+        if self.cfg.hardware_sim and self.cfg.hardware_sim.add_noise:
+            self._apply_multi_sensor_noise()
     
+
+
+
     def _apply_sensor_noise(self):
         """Apply configured sensor noise to measurements."""
         noise_cfg = self.cfg.hardware_sim.noise_stddev
@@ -271,25 +381,140 @@ class MujocoSimulator:
             axis_angle = self._quaternion_to_axis_angle(self._quat_world)
             axis_angle += np.random.normal(0, noise_cfg["orientation"], axis_angle.shape)
             self._quat_world = self._axis_angle_to_quaternion(axis_angle)
-    
+
+    def _apply_multi_sensor_noise(self):
+        """Apply configured sensor noise to measurements for multiple environments."""
+        noise_cfg = self.cfg.hardware_sim.noise_stddev
+        for i in range(self.num_envs):
+            self._dof_pos_list[i] += np.random.normal(0, noise_cfg["position"], self._dof_pos_list[i].shape)
+            self._dof_vel_list[i] += np.random.normal(0, noise_cfg["velocity"], self._dof_vel_list[i].shape)
+            
+            if self._dof_trq_list[i] is not None:
+                self._dof_trq_list[i] += np.random.normal(0, noise_cfg["velocity"], self._dof_trq_list[i].shape)
+                
+            self._lin_vel_world_list[i] += np.random.normal(0, noise_cfg["velocity"], self._lin_vel_world_list[i].shape)
+            self._ang_vel_body_list[i] += np.random.normal(0, noise_cfg["velocity"], self._ang_vel_body_list[i].shape)
+            self._lin_acc_world_list[i] += np.random.normal(0, noise_cfg["acceleration"], self._lin_acc_world_list[i].shape)
+            
+            # Recalculate transformed quantities
+            self._lin_vel_body_list[i] = self._world_to_body_rot_list[i].T @ self._lin_vel_world_list[i]
+            self._ang_vel_world_list[i] = self._world_to_body_rot_list[i] @ self._ang_vel_body_list[i]
+            
+            # Add small noise to orientation
+            if noise_cfg["orientation"] > 0:
+                for i in range(self.num_envs):
+                    axis_angle = self._quaternion_to_axis_angle(self._quat_world_list[i])
+                    axis_angle += np.random.normal(0, noise_cfg["orientation"], axis_angle.shape)
+                    self._quat_world_list[i] = self._axis_angle_to_quaternion(axis_angle)
+
     def step(self):
         """Step the simulation, with decimation."""
         # Run multiple physics steps according to decimation factor
         for _ in range(self.cfg.decimation):
             # Compute and apply control torques
-            self.data.ctrl[:] = self.compute_torque(torque_limitation=self.cfg.joint_config.torque_limits)
+            # self.data.ctrl[:] = self.compute_torque(torque_limitation=self.cfg.joint_config.torque_limits)
             
             # Step physics
-            mujoco.mj_step(self.model, self.data)
+            # mujoco.mj_step(self.model, self.data)
+            for i in range(self.num_envs):
+                data = self.datalist[i]
+                # Compute and apply control torques
+                data.ctrl[:] = self.compute_multi_torque(torque_limitation=self.cfg.joint_config.torque_limits, env_idx=i)
+                
+                # Step physics
+                mujoco.mj_step(self.model, data)
         
+        self.data.qpos[:] = self.datalist[self._current_env_idx].qpos[:]
+        self.data.qvel[:] = self.datalist[self._current_env_idx].qvel[:]
+        self.data.ctrl[:] = self.datalist[self._current_env_idx].ctrl[:]
+        mujoco.mj_forward(self.model, self.data)
+        if np.any(self.data.xfrc_applied != 0):
+                self.datalist[self._current_env_idx].xfrc_applied[:] = self.data.xfrc_applied[:]
         # Update state after all physics steps
         self.update_state()
-            
+        self.update_multi_state()
+
         # Render if viewer is active
         if self.viewer and self.viewer.is_running():
+            # Tell viewer which environment is currently active
+            if hasattr(self.viewer, 'set_current_env_idx'):
+                self.viewer.set_current_env_idx(self._current_env_idx)
+            
+            # Update other environments' poses for multi-env rendering
+            if hasattr(self.viewer, 'set_other_env_qpos'):
+                for i in range(self.num_envs):
+                    self.viewer.set_other_env_qpos(i, self.datalist[i].qpos)
+            
             self.viewer.sync()
             
         return True
+    
+    def switch_active_env(self, env_idx: int) -> None:
+        """Switch the active environment for rendering.
+        
+        Args:
+            env_idx: Index of environment to make active (0 to num_envs-1)
+        """
+        if env_idx < 0 or env_idx >= self.num_envs:
+            logger_mp.warning(f"Invalid env_idx {env_idx}, must be in range [0, {self.num_envs-1}]")
+            return
+            
+        self._current_env_idx = env_idx
+        
+        # Immediately update self.data to show the selected environment
+        self.data.qpos[:] = self.datalist[env_idx].qpos[:]
+        self.data.qvel[:] = self.datalist[env_idx].qvel[:]
+        self.data.ctrl[:] = self.datalist[env_idx].ctrl[:]
+        
+        # Update kinematics
+        mujoco.mj_forward(self.model, self.data)
+        
+        # Tell viewer which environment is currently active
+        if self.viewer and hasattr(self.viewer, 'set_current_env_idx'):
+            self.viewer.set_current_env_idx(env_idx)
+        
+        # Update other environments' poses for multi-env rendering
+        if self.viewer and hasattr(self.viewer, 'set_other_env_qpos'):
+            for i in range(self.num_envs):
+                self.viewer.set_other_env_qpos(i, self.datalist[i].qpos)
+        
+        # Sync viewer to clear old geoms and render new state immediately
+        if self.viewer and self.viewer.is_running():
+            self.viewer.sync()
+                
+        logger_mp.info(f"Switched active rendering environment to {env_idx}")
+
+    def handle_viewer_input(self) -> None:
+        """Handle viewer keyboard input for environment switching.
+        
+        Call this in your main loop to enable keyboard shortcuts:
+        - Press '1', '2', '3'... to switch between environments
+        - Press UP arrow for next environment
+        - Press DOWN arrow for previous environment
+        """
+        if self.viewer is None or not hasattr(self.viewer, 'is_running'):
+            return
+            
+        # Check if ViewerPlus has key event handling
+        if hasattr(self.viewer, 'get_key_events'):
+            key_events = self.viewer.get_key_events()
+            
+            for key in key_events:
+                # Number keys 1-9 for direct environment selection
+                if key.isdigit() and '1' <= key <= '9':
+                    env_idx = int(key) - 1
+                    if env_idx < self.num_envs:
+                        self.switch_active_env(env_idx)
+                
+                # UP arrow for next environment
+                elif key == 'ARROW_UP':
+                    next_idx = (self._current_env_idx + 1) % self.num_envs
+                    self.switch_active_env(next_idx)
+                
+                # DOWN arrow for previous environment
+                elif key == 'ARROW_DOWN':
+                    prev_idx = (self._current_env_idx - 1) % self.num_envs
+                    self.switch_active_env(prev_idx)
 
     def compute_torque(self, torque_limitation=None):
         """Compute joint control torques using PD control.
@@ -300,7 +525,6 @@ class MujocoSimulator:
         # Get current unmapped joint state
         q_all = self.data.qpos[7:].copy()
         dq_all = self.data.qvel[6:].copy()
-        
         if not self.lag_buffer:
             # No lag buffer or commands available
             return np.zeros(len(self._joint_names_orig))
@@ -335,7 +559,58 @@ class MujocoSimulator:
             if mapped_idx < len(tau):
                 full_tau[orig_idx] = tau[mapped_idx]
         return full_tau
+    
+    def compute_multi_torque(self, torque_limitation=None, env_idx=0):
+        """Compute joint control torques using PD control for multiple environments.
+        
+        torque_limitation: Optional limit for joint torques, in controller order.
+        return: Full joint torques in mujoco order.
+        """
+        # For simplicity, only implement single environment version here
+        # Multi-environment version would require more complex handling
+        # Get current unmapped joint state
+        data = self.datalist[env_idx]
+        q_all = data.qpos[7:].copy()
+        dq_all = data.qvel[6:].copy()
 
+        if not self.lag_buffer_list or not self.lag_buffer_list[env_idx]:
+            # No lag buffer or commands available
+            return np.zeros(len(self._joint_names_orig))
+
+        # Get commands from lag buffer_list and update _tar_dof_pos_list
+        cmd = self.lag_buffer_list[env_idx][0]
+        target_q = cmd["q"]
+        
+        self._tar_dof_pos_list[env_idx] = target_q.copy()
+        target_dq = cmd["dq"]
+        target_trq = cmd["trq"]
+        target_kp = cmd["kp"]
+        target_kd = cmd["kd"]
+
+        # Get current mapped joint state
+        q = np.array([q_all[i] for i in self._joint_mapping])
+        dq = np.array([dq_all[i] for i in self._joint_mapping])
+
+        # Calculate PD control torque
+        tau = target_trq + target_kp * (target_q - q) + target_kd * (target_dq - dq)
+
+        # Apply torque limits if specified
+        if torque_limitation is not None:
+            torque_limitation = np.array(torque_limitation)
+            tau = np.clip(tau, -torque_limitation, torque_limitation)
+
+        # Store the mapped torques directly in _dof_trq_list for reporting
+        self._dof_trq_list[env_idx] = tau.copy()
+
+        # Map torques back to full joint array
+        full_tau = np.zeros(len(self._joint_names_orig))
+        for mapped_idx, orig_idx in enumerate(self._joint_mapping):
+            if mapped_idx < len(tau):
+                full_tau[orig_idx] = tau[mapped_idx]
+        return full_tau
+            
+  
+        
     def set_joint_commands(self, q, dq, trq, kp, kd):
         """Set joint commands with lag simulation if configured."""
         # Normalize inputs to 1D float arrays (avoid unexpected shapes/types)
@@ -388,6 +663,59 @@ class MujocoSimulator:
         else:
             # No lag - directly set current command
             self.lag_buffer = [new_cmd]
+
+    def set_multi_joint_commands(self, q, dq, trq, kp, kd, env_idx=0):
+        """Set joint commands for a specific environment."""
+        # Normalize inputs to 1D float arrays (avoid unexpected shapes/types)
+        q   = np.asarray(q, dtype=np.float32).ravel()
+        dq  = np.asarray(dq, dtype=np.float32).ravel()
+        trq = np.asarray(trq, dtype=np.float32).ravel()
+        kp  = np.asarray(kp, dtype=np.float32).ravel()
+        kd  = np.asarray(kd, dtype=np.float32).ravel()
+        # optional: validate length if you expect a fixed number of DOFs
+        if q.size >= len(self._joint_names):
+            q = q[:len(self._joint_names)]
+            dq = dq[:len(self._joint_names)]
+            trq = trq[:len(self._joint_names)]
+            kp = kp[:len(self._joint_names)]
+            kd = kd[:len(self._joint_names)]
+        else:
+            raise ValueError("q length mismatch")
+
+        # Apply joint limits if configured
+        if (self.cfg.joint_config and 
+            self.cfg.joint_config.joint_limits_min is not None and 
+            self.cfg.joint_config.joint_limits_max is not None):
+            try:
+                limits_min = np.array(self.cfg.joint_config.joint_limits_min)
+                limits_max = np.array(self.cfg.joint_config.joint_limits_max)
+                
+                if len(limits_min) >= len(q) and len(limits_max) >= len(q):
+                    q = np.clip(q, limits_min[:len(q)], limits_max[:len(q)])
+            except Exception as e:
+                logger_mp.warning(f"Warning: Could not apply joint limits: {e}")
+        
+        # Create new command
+        new_cmd = {
+            "q": q.copy(), 
+            "dq": dq.copy(), 
+            "trq": trq.copy(), 
+            "kp": kp.copy(), 
+            "kd": kd.copy()
+        }
+        
+        # Initialize lag buffer if it doesn't exist
+        if self.lag_buffer_list[env_idx] is None:
+            self.lag_buffer_list[env_idx] = [new_cmd]
+            return
+        
+        # Update lag buffer based on lag configuration
+        if self.cfg.hardware_sim and self.cfg.hardware_sim.lag_steps > 0:
+            # Push new command to the end of the buffer
+            self.lag_buffer_list[env_idx] = self.lag_buffer_list[env_idx][1:] + [new_cmd]
+        else:
+            # No lag - directly set current command
+            self.lag_buffer_list[env_idx] = [new_cmd]
 
     def reset(self, joint_positions=None, base_position=None, base_orientation=None):
         """Reset the simulator state.
@@ -523,6 +851,11 @@ class MujocoSimulator:
     def quaternion(self):
         """Base orientation as quaternion [w, x, y, z] in world frame."""
         return self._quat_world
+    
+    @property
+    def quaternion_list(self):
+        """Get quaternion list for multiple environments."""
+        return self._quat_world_list
 
     @property
     def quaternion_body(self):
@@ -560,9 +893,19 @@ class MujocoSimulator:
         return self._lin_acc_world
     
     @property
+    def linear_acceleration_list(self):
+        """Linear acceleration in world frame."""
+        return self._lin_acc_world_list
+
+    @property
     def joint_positions(self):
         """Joint positions after mapping."""
         return self._dof_pos
+    
+    @property
+    def joint_positions_list(self):
+        """Joint positions after mapping."""
+        return self._dof_pos_list
 
     @property
     def target_joint_positions(self):
@@ -573,12 +916,22 @@ class MujocoSimulator:
     def joint_velocities(self):
         """Joint velocities after mapping."""
         return self._dof_vel
-    
+
+    @property
+    def joint_velocities_list(self):
+        """Joint velocities after mapping."""
+        return self._dof_vel_list
+
     @property
     def joint_torques(self):
         """Joint torques after mapping."""
         return self._dof_trq
     
+    @property
+    def joint_torques_list(self):
+        """Joint torques after mapping."""
+        return self._dof_trq_list
+
     @property
     def joint_names(self):
         """Joint names after mapping."""
@@ -604,6 +957,11 @@ class MujocoSimulator:
     def angular_velocity_body(self):
         """Angular velocity in body frame (native MuJoCo format)."""
         return self._ang_vel_body
+    
+    @property
+    def angular_velocity_body_list(self):
+        """Angular velocity in body frame (native MuJoCo format)."""
+        return self._ang_vel_body_list
     
     # Frame transformation methods
     def transform_to_world_frame(self, vector, is_position=False):
