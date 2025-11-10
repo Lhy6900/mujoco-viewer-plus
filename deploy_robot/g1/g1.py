@@ -26,6 +26,7 @@ class G1Config(RobotBaseConfig):
     # default value
     network_interface: str | None = None
     mode: Mode = Mode.PR
+    dds_domain_id: int = 1  # DDS domain ID for multi-environment support (sim only)
 
 class G1(RobotBase):
     """G1 29 dof robot interface
@@ -60,7 +61,12 @@ class G1(RobotBase):
         if self.cfg.env == 'real':
             ChannelFactoryInitialize(0, self.cfg.network_interface)
         elif self.cfg.env == 'sim':
-            ChannelFactoryInitialize(1)     # simulation will use channel 1
+            # Use configured domain ID for multi-environment support
+            # origin
+            # ChannelFactoryInitialize(self.cfg.dds_domain_id)     # simulation will use configured domain ID
+            # modified
+            from unitree_sdk2py.core.channel import ChannelFactory, ChannelFactoryInitialize
+            self.factory: ChannelFactory = ChannelFactoryInitialize(self.cfg.dds_domain_id)
 
         # prepare hardware interface components
         self.joystick = Joystick()
@@ -106,6 +112,8 @@ class G1(RobotBase):
         Returns:
             None
         """
+        start_time = time.time()
+        print(f"[{type(self).__name__}] Starting robot communication...")
         # close motion controller
         if self.cfg.env == 'real':
             self.msc = MotionSwitcherClient()
@@ -118,29 +126,62 @@ class G1(RobotBase):
                 status, result = self.msc.CheckMode()
                 time.sleep(1)
 
-        # create publisher #
-        self.lowcmd_publisher_ = ChannelPublisher("rt/lowcmd", LowCmd_)
-        self.lowcmd_publisher_.Init()
+        # origin
+        # # create publisher #
+        # self.lowcmd_publisher_ = ChannelPublisher("rt/lowcmd", LowCmd_)
+        # self.lowcmd_publisher_.Init()
+
+        # # create subscriber #
+        # self.lowstate_subscriber = ChannelSubscriber("rt/lowstate", LowState_)
+        # self.lowstate_subscriber.Init(self._lowstate_handler, 10)
+
+        # modified
+        # # create publisher #
+        self.lowcmd_publisher_ = self.factory.CreateChannel("rt/lowcmd", LowCmd_)
+        self.lowcmd_publisher_.SetWriter()
 
         # create subscriber #
-        self.lowstate_subscriber = ChannelSubscriber("rt/lowstate", LowState_)
-        self.lowstate_subscriber.Init(self._lowstate_handler, 10)
+        self.lowstate_subscriber = self.factory.CreateChannel("rt/lowstate", LowState_)
+        # pass handler and queueLen by keyword to match SetReader signature
+        self.lowstate_subscriber.SetReader(handler=self._lowstate_handler, queueLen=10)
 
         while self.low_state is None:
-            time.sleep(0.1) 
+            time.sleep(0.01)  # Reduced sleep time for faster startup
             logger_mp.warning(f"[{type(self).__name__}] Waiting to subscribe dds...")
         logger_mp.info(f"[{type(self).__name__}] Robot communication started.")
 
         self.enable_motor = True
         self.enable_control = True
-
+        
+        # Immediately send a holding command to prevent free-fall
+        # This keeps the robot at its current position with moderate stiffness
+        logger_mp.info(f"[{type(self).__name__}] Sending initial holding command...")
+        self.update_state()  # Get current state first
+        initial_hold_kp = np.full(G1_NUM_MOTOR, 100.0)  # Moderate stiffness
+        initial_hold_kd = np.full(G1_NUM_MOTOR, 5.0)    # Moderate damping
+        
+        # Temporarily override kp/kd for initial hold
+        orig_kp = self.dof_kp.copy()
+        orig_kd = self.dof_kd.copy()
+        self.dof_kp = initial_hold_kp
+        self.dof_kd = initial_hold_kd
+        
+        # Send holding command at current position
+        self._send_motor_cmd(target_q=self.dof_pos)
+        
+        # Restore original gains
+        self.dof_kp = orig_kp
+        self.dof_kd = orig_kd
+        
+        end_time = time.time()
+        print(f"[{type(self).__name__}] Robot communication startup time: {end_time - start_time:.3f} seconds.")
     def stop_communication(self):
         if self.cfg.env == 'real':
             if self.lowstate_subscriber is not None:
                 self.lowstate_subscriber.Close()
             if self.lowcmd_publisher_ is not None:
                 self.lowcmd_publisher_.Close()
-
+        # 没有sim,不用管
         self.enable_motor = False
         self.enable_control = False
         logger_mp.info(f"[{type(self).__name__}] Robot communication stopped.")
@@ -202,6 +243,7 @@ class G1(RobotBase):
         - Joint encoders
         - Joystick
         """
+        print('[DEBUG]--Updating robot state...',self.cfg.dds_domain_id, 'self.rpy:', self.low_state.imu_state.rpy)
         ### base imu
         q = self.low_state.imu_state.quaternion  # wxyz
         self.base_quat = np.array([q[1], q[2], q[3], q[0]])  # turn to xyzw

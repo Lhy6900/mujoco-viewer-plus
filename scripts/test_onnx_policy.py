@@ -106,6 +106,7 @@ def main():
     parser.add_argument("model", type=str, help="Path to the .onnx model file")
     parser.add_argument("--runs", type=int, default=10, help="Number of inference runs")
     parser.add_argument("--gpu", action="store_true", help="Use CUDAExecutionProvider if available")
+    parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to simulate")
     args = parser.parse_args()
 
     print_model_info(args.model)

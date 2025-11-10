@@ -5,14 +5,14 @@ from deploy_robot.sim.mujoco_simulator import MujocoSimulator, MujocoSimulatorCo
 
 import logging_mp
 logger_mp = logging_mp.get_logger(__name__)
-
+from deploy_robot.sim.mujoco_multisimulator import MultiMujocoSimulator
 import threading
 import time
 from typing import Optional
 import numpy as np
 
 
-class MujocoEnv:
+class MultiMujocoEnv:
     """Wrapper of MujocoSimulator with fixed-Hz threaded stepping.
 
     - Publishes/consumes DDS messages to mimic hardware.
@@ -21,11 +21,22 @@ class MujocoEnv:
     """
 
     def __init__(self, cfg: MujocoSimulatorConfig, step_hz: Optional[float] = None):
-        self.simulator = MujocoSimulator(cfg)
-
+        self.num_envs = cfg.num_envs
+        self.simulator = MujocoSimulator(cfg) if self.num_envs == 1 else MultiMujocoSimulator(cfg)
+        
         # DDS object registration
         self.g1_robot_dds = G1RobotDDS()
         dds_manager.register_object("g1_robot", self.g1_robot_dds)
+        if self.num_envs > 1:
+            self.g1_robot_dds_list: List[G1RobotDDS] = []
+            for i in range(self.num_envs):
+                # Use domain_id = 1 + i for each environment
+                dds_domain_id = 1 + i
+                dds_obj = G1RobotDDS(node_name=f"g1_robot_{i}", dds_domain_id=dds_domain_id)
+                dds_name = f"g1_robot_{i}" if self.num_envs > 1 else "g1_robot"
+                dds_manager.register_object(dds_name, dds_obj)
+                self.g1_robot_dds_list.append(dds_obj)
+                logger_mp.info(f"Registered DDS object: {dds_name} (domain_id={dds_domain_id})")
 
         # Start DDS comms immediately (keep existing behavior)
         try:
@@ -146,6 +157,7 @@ class MujocoEnv:
                 
                 # Read latest command (non-blocking, no lock)
                 low_cmd = self.g1_robot_dds.get_robot_command()
+                low_cmds = [self.g1_robot_dds_list[i].get_robot_command() for i in range(self.num_envs)] if self.num_envs > 1 else None
 
                 # Apply command, step, and copy state under short lock
                 with self._sim_lock:
@@ -158,6 +170,19 @@ class MujocoEnv:
                             kp=motor_cmd["kp"],
                             kd=motor_cmd["kd"],
                         )
+                    if low_cmds:
+                        for i in range(self.num_envs):
+                            if low_cmds[i]:
+                                motor_cmd = low_cmds[i]["motor_cmd"]
+                                self.simulator.set_multi_joint_commands(
+                                    q=motor_cmd["positions"],
+                                    dq=motor_cmd["velocities"],
+                                    trq=motor_cmd["torques"],
+                                    kp=motor_cmd["kp"],
+                                    kd=motor_cmd["kd"],
+                                    env_idx=i
+                                )
+
 
                     # Only step the simulator if not paused
                     if not is_paused:
@@ -172,6 +197,36 @@ class MujocoEnv:
                     joint_velocities = self.simulator.joint_velocities.copy()
                     joint_torques = self.simulator.joint_torques.copy()
 
+                    joint_positions_list = []
+                    joint_velocities_list = []
+                    joint_torques_list = []
+                    rpy_list = []
+                    quat_list = []
+                    lin_acc_body_list = []
+                    ang_vel_body_list = []
+    
+                    for i in range(self.num_envs):
+                        # 假设 MultiMujocoSimulator 有 get_state_for_env(i) 或类似接口
+                        # 或者直接访问 _dof_pos_list[i] 等
+                        rpy_i = self.simulator._quaternion_to_euler(self.simulator.quaternion_list[i])
+                        quat_i = self.simulator.quaternion_list[i].copy()
+                        lin_acc_body_i = self.simulator.transform_to_body_frame(
+                            self.simulator.linear_acceleration_list[i]
+                        ).copy()
+                        ang_vel_body_i = self.simulator.angular_velocity_body_list[i].copy()
+                        joint_positions_i = self.simulator.joint_positions_list[i].copy()
+                        joint_velocities_i = self.simulator.joint_velocities_list[i].copy()
+                        joint_torques_i = self.simulator.joint_torques_list[i].copy()
+
+                        joint_positions_list.append(joint_positions_i)
+                        joint_velocities_list.append(joint_velocities_i)
+                        joint_torques_list.append(joint_torques_i)
+                        rpy_list.append(rpy_i)
+                        quat_list.append(quat_i)
+                        lin_acc_body_list.append(lin_acc_body_i)
+                        ang_vel_body_list.append(ang_vel_body_i)
+
+
                 # Publish without holding the lock (always publish, even when paused)
                 imu_data = np.concatenate([rpy, quat, lin_acc_body, ang_vel_body])
                 self.g1_robot_dds.write_robot_state(
@@ -180,7 +235,16 @@ class MujocoEnv:
                     joint_torques=joint_torques,
                     imu_data=imu_data,
                 )
-
+                for i in range(self.num_envs):
+                    imu_data = np.concatenate([rpy_list[i], quat_list[i], 
+                                            lin_acc_body_list[i], ang_vel_body_list[i]])
+                    self.g1_robot_dds_list[i].write_robot_state(
+                        joint_positions=joint_positions_list[i],
+                        joint_velocities=joint_velocities_list[i],
+                        joint_torques=joint_torques_list[i],
+                        imu_data=imu_data,
+                    )
+                
                 # Fixed-rate timing
                 next_time += self._step_period
                 sleep_time = next_time - time.perf_counter()

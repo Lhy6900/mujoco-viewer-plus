@@ -20,34 +20,52 @@ logger_mp = logging_mp.get_logger(__name__)
 class G1RobotDDS(DDSObject):
     """G1 robot DDS communication class - singleton pattern"""
     
-    def __init__(self, node_name: str = "g1_robot"):
-        """Initialize the G1 robot DDS node"""
+    def __init__(self, node_name: str = "g1_robot", dds_domain_id: int = 0):
+        """Initialize the G1 robot DDS node
+        
+        Args:
+            node_name: Name of the DDS node
+            dds_domain_id: DDS domain ID for multi-environment support
+        """
         # avoid duplicate initialization
         if hasattr(self, '_initialized'):
             return
             
         super().__init__()
         self.node_name = node_name
+        self.dds_domain_id = dds_domain_id
         self.crc = CRC()
         self.low_state = unitree_hg_msg_dds__LowState_()
         self._initialized = True
         
-        # setup the shared memory
+        # setup the shared memory with unique names per environment
         self.setup_shared_memory(
-            input_shm_name="isaac_robot_state",  # read the state of the G1 robot from Isaac Lab
-            output_shm_name="dds_robot_cmd",  # output the command to Isaac Lab
+            input_shm_name=f"isaac_robot_state_{self.node_name}",  # unique per environment
+            output_shm_name=f"dds_robot_cmd_{self.node_name}",  # unique per environment
             input_size=3072,
-            output_size=3072  # output the command to Isaac Lab
+            output_size=3072
         )
         
-        logger_mp.info("[%s] G1 robot DDS node initialized", self.node_name)
+        logger_mp.info("[%s] G1 robot DDS node initialized with unique shared memory", self.node_name)
     
     def setup_publisher(self) -> bool:
         """Setup the publisher of the G1 robot"""
         try:
-            self.publisher = ChannelPublisher("rt/lowstate", LowState_)
-            self.publisher.Init()
-            logger_mp.info("[%s] State publisher initialized (rt/lowstate)", self.node_name)
+            # Initialize the DDS domain for this specific environment
+            from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelFactory
+            # origin
+            # ChannelFactoryInitialize(self.dds_domain_id)
+            # self.publisher = ChannelPublisher("rt/lowstate", LowState_)
+            # self.publisher.Init()
+            # modified
+            self.factory: ChannelFactory = ChannelFactoryInitialize(self.dds_domain_id)
+            # use the public accessor to avoid name-mangling issues with private attrs
+            self.publisher = self.factory.CreateChannel("rt/lowstate", LowState_)
+            self.publisher.SetWriter()
+            
+            
+            logger_mp.info("[%s] State publisher initialized (rt/lowstate) on domain %d", 
+                          self.node_name, self.dds_domain_id)
             return True
         except Exception:
             logger_mp.exception("[%s] State publisher initialization failed", self.node_name)
@@ -56,9 +74,20 @@ class G1RobotDDS(DDSObject):
     def setup_subscriber(self) -> bool:
         """Setup the subscriber of the G1 robot"""
         try:
-            logger_mp.debug("[%s] Create ChannelSubscriber...", self.node_name)
-            self.subscriber = ChannelSubscriber("rt/lowcmd", LowCmd_)
-            self.subscriber.Init(lambda msg: self.dds_subscriber(msg, ""), 32)
+            # Initialize the DDS domain for this specific environment
+            from unitree_sdk2py.core.channel import ChannelFactoryInitialize, ChannelFactory
+            # origin
+            # ChannelFactoryInitialize(self.dds_domain_id)
+            # self.subscriber = ChannelSubscriber("rt/lowcmd", LowCmd_)
+            # self.subscriber.Init(lambda msg: self.dds_subscriber(msg, ""), 32)
+            # modified
+            self.factory: ChannelFactory = ChannelFactoryInitialize(self.dds_domain_id)
+            self.subscriber = self.factory.CreateChannel("rt/lowcmd", LowCmd_)
+            # SetReader signature: SetReader(qos: Qos = None, handler: Callable = None, queueLen: int = 0)
+            # pass handler and queueLen by keyword so the handler isn't mistaken for qos
+            self.subscriber.SetReader(handler=lambda msg: self.dds_subscriber(msg, ""), queueLen=32)
+            logger_mp.info("[%s] Command subscriber initialized (rt/lowcmd) on domain %d", 
+                          self.node_name, self.dds_domain_id)
             return True
         except Exception:
             logger_mp.exception("[%s] Command subscriber initialization failed", self.node_name)

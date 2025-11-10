@@ -188,7 +188,7 @@ class Channel:
 """
 " class ChannelFactory
 """
-class ChannelFactory(Singleton):
+class ChannelFactory():
     __domain = None
     __participant = None
     __qos = None
@@ -296,6 +296,7 @@ class ChannelSubscriber:
 " function ChannelFactoryInitialize. used to intialize channel everenment.
 """
 def ChannelFactoryInitialize(id: int = 0, networkInterface: str = None):
-    factory = ChannelFactory()
+    factory = ChannelFactory(id, networkInterface)
     if not factory.Init(id, networkInterface):
         raise Exception("channel factory init error.")
+    return factory
