@@ -230,22 +230,19 @@ if __name__ == "__main__":
         while viewer.is_running() and time.time() - start < simulation_duration:
             step_start = time.time()
             
-            # 先执行所有环境的仿真步
-            for i in range(num_envs):
-                mujoco.mj_step(m, dlist[i])
-                tau_i = pd_control(target_dof_pos_list[i], dlist[i].qpos[7:], stiffness_array, np.zeros_like(damping_array), dlist[i].qvel[6:], damping_array)
-                dlist[i].ctrl[:] = tau_i
-            
             # 将当前选中的环境数据同步到viewer的主数据d
             idx = current_env_idx.value
             d.qpos[:] = dlist[idx].qpos[:]
             d.qvel[:] = dlist[idx].qvel[:]
             d.ctrl[:] = dlist[idx].ctrl[:]
+            # 注意：不复制 xfrc_applied，让 viewer 交互系统自己管理
             mujoco.mj_forward(m, d)
             
-            # 如果有外力扰动（通过viewer交互施加），将其应用回选中的环境
-            if np.any(d.xfrc_applied != 0):
-                dlist[idx].xfrc_applied[:] = d.xfrc_applied[:]
+            # 执行所有环境的仿真步
+            for i in range(num_envs):
+                tau_i = pd_control(target_dof_pos_list[i], dlist[i].qpos[7:], stiffness_array, np.zeros_like(damping_array), dlist[i].qvel[6:], damping_array)
+                dlist[i].ctrl[:] = tau_i
+                mujoco.mj_step(m, dlist[i])
             
             # counter 共用
             counter += 1
@@ -446,6 +443,15 @@ if __name__ == "__main__":
             
             
             viewer.sync()
+            
+            # 在 viewer.sync() 之后，检查用户是否通过交互施加了外力
+            # viewer.sync() 会处理鼠标拖拽等交互，并更新 d.xfrc_applied
+            if np.any(d.xfrc_applied != 0):
+                # 将外力复制到当前选中的环境
+                dlist[current_env_idx.value].xfrc_applied[:] = d.xfrc_applied[:]
+            else:
+                d.xfrc_applied[:] = 0
+                dlist[current_env_idx.value].xfrc_applied[:] = 0
 
             # 下面注释掉的代码用于精确控制仿真步长
             time_until_next_step = m.opt.timestep - (time.time() - step_start)
