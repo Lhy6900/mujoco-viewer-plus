@@ -17,7 +17,7 @@ from utils import (
 from bm_logger import BMLogger
 from reward_calculator import compute_rewards
 from reward_plotter import RewardPlotter
-from reward_plotter import RewardPlotter
+from ghost_renderer import GhostRenderer
 
 # 主程序入口
 if __name__ == "__main__":
@@ -140,16 +140,10 @@ if __name__ == "__main__":
     ])
     print("[奖励可视化] RewardPlotter 已初始化，图表将显示在屏幕右侧")
     
-    # 初始化奖励绘图器
-    reward_plotter = RewardPlotter(history_length=300)  # 保存300步历史（约6秒@50Hz）
-    reward_plotter.register_terms([
-        "smoothness",
-        "pos_tracking_global",
-        "pos_tracking_local",
-        "quat_tracking_global",
-        "quat_tracking_local"
-    ])
-    print("[奖励可视化] RewardPlotter 已初始化，图表将显示在屏幕右侧")
+    # 初始化 Ghost 渲染器
+    ghost_renderer = GhostRenderer(m)
+    print("[Ghost 可视化] GhostRenderer 已初始化，将显示半透明绿色参考轨迹")
+    
     # 多环境初始化，包括action_buffer,timestep,motion_input还有默认位置，注意下面两个for循环不能合并，timestep列表要先完成初始化
     action_buffer_list = []
     timestep_list = []
@@ -186,6 +180,7 @@ if __name__ == "__main__":
     current_env_idx = Value('i', 0)  # 使用共享内存变量
     show_other_envs = Value('i', 0)  # 是否显示其他环境（0=不显示，1=显示）
     show_reward_plot = Value('i', 1)  # 是否显示奖励曲线（0=不显示，1=显示，默认显示）
+    show_ghost = Value('i', 1)  # 是否显示 ghost 参考轨迹（0=不显示，1=显示，默认显示）
     
     # 用于检测 Ctrl 键状态
     ctrl_pressed = Value('i', 0)  # 0=未按下，1=已按下
@@ -220,6 +215,12 @@ if __name__ == "__main__":
             show_reward_plot.value = 1 - show_reward_plot.value
             status = "显示" if show_reward_plot.value else "隐藏"
             print(f"[奖励可视化] {status}奖励曲线窗口")
+            ctrl_pressed.value = 0  # 重置 Ctrl 状态
+        # Ctrl+G - 切换 ghost 显示
+        elif (key == 71 or key == 103) and ctrl_pressed.value:  # 'G' 或 'g' + Ctrl
+            show_ghost.value = 1 - show_ghost.value
+            status = "显示" if show_ghost.value else "隐藏"
+            print(f"[Ghost 可视化] {status}参考轨迹")
             ctrl_pressed.value = 0  # 重置 Ctrl 状态
     
     # 启动mujoco可视化窗口，传入键盘回调
@@ -313,6 +314,52 @@ if __name__ == "__main__":
                     print(f"[警告] 奖励计算失败: {e}")
                 # ===== 奖励计算结束 =====
                 
+                # ===== 构造 Ghost Qpos（新增）=====
+                try:
+                    # 使用 policy.run 获取 body_pos_w 和 body_quat_w
+                    ghost_outputs = policy.run(
+                        ['body_pos_w', 'body_quat_w'],
+                        {
+                            'obs': obs_tensor.numpy(),
+                            'time_step': np.array([timestep], dtype=np.float32).reshape(1,1)
+                        }
+                    )
+                    
+                    # 从返回的列表中提取数据
+                    policy_body_pos_w = ghost_outputs[0]   # (1, 14, 3)
+                    policy_body_quat_w = ghost_outputs[1]  # (1, 14, 4)
+                    
+                    # 从 policy 输出提取 root 位置和姿态
+                    # 使用第一个 body（索引 0）作为 base/root
+                    base_pos_policy = policy_body_pos_w[0, 0, :]  # (3,) - XYZ 位置
+                    base_quat_policy = policy_body_quat_w[0, 0, :]  # (4,) - 四元数    
+                    base_quat_mujoco = base_quat_policy
+                    
+                    # 提取参考轨迹的关节角度（joint_seq 顺序）
+                    joint_pos_ref_seq = motionrefinputpos[timestep, :]  # (num_joints,)
+                    
+                    # 转换为 dof 顺序（joint_xml 顺序）
+                    ghost_joint_pos_dof = np.array([
+                        joint_pos_ref_seq[joint_seq.index(joint)] 
+                        for joint in joint_xml
+                    ])
+                    
+                    # 构造完整的 ghost_qpos
+                    ghost_qpos = ghost_renderer.construct_ghost_qpos(
+                        base_pos=base_pos_policy,
+                        base_quat=base_quat_mujoco,
+                        joint_pos_dof_order=ghost_joint_pos_dof,
+                        current_qpos=d.qpos
+                    )
+                    
+                    # 设置 ghost 姿态
+                    ghost_renderer.set_ghost_qpos(ghost_qpos)
+                    
+                except Exception as e:
+                    if timestep % 100 == 0:  # 每100步打印一次错误
+                        print(f"[警告] Ghost qpos 构造失败: {e}")
+                # ===== Ghost Qpos 构造结束 =====
+                
                 # 时间步加1，准备处理下一帧数据
                 timestep+=1
                 for i in range(num_envs):
@@ -370,6 +417,15 @@ if __name__ == "__main__":
             # 同步viewer，刷新显示
             # 清空user_scn中的geoms，为渲染其他环境做准备
             viewer.user_scn.ngeom = 0
+            
+            # ===== 渲染 Ghost（新增）=====
+            if show_ghost.value:
+                try:
+                    ghost_renderer.render_ghost(viewer.user_scn)
+                except Exception as e:
+                    if timestep % 100 == 0:  # 每100步打印一次错误
+                        print(f"[警告] Ghost 渲染失败: {e}")
+            # ===== Ghost 渲染结束 =====
             
             # 只有在 show_other_envs 为 True 时才渲染其他环境
             if show_other_envs.value:
