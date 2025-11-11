@@ -1,0 +1,27 @@
+##  sym ---------
+# policy_path: "D:/RL/deploy/model/model_39800_origin.pt"  #original modelmodel_22400_cz_bigforce+pos+mask
+# policy_path: "D:/RL/deploy/model/model_11600_cz_0708.pt"  #MLP model with push task
+# policy_path: "D:/RL/deploy/model/model_33500_Jul25_10-47-38_origin_pos=0.5_keypoint=0.1_basequat=0.1_dt=0.005_numenvs=10000.pt" #60max
+policy_path: "D:/RL/deploy/model/SII_model/testspring0923/F30model_11000.pt" #   20200是Fm30的0.005的柔顺性
+
+xml_path: "D:/RL/deploy/resources/robots/g1_description/g1_29dof_zy.xml"
+# xml_path: "D:/RL/deploy/resources/robots/g1_description/g1_29dof.xml"
+
+
+traj_path: "D:/RL/deploy/trajectory/41.csv"
+
+# 日志保存路径
+# log_save_path: "D:/RL/deploy/logs/7-28-model_33500_Jul25_10-47-38_origin_pos=0.5_keypoint=0.1_basequat=0.1_dt=0.005_numenvs=10000.npz"
+log_save_path: "D:/RL/deploy/logs/0916-testupper/F30_model_11000.npz" # 这个理论上应该跟踪的差一些，
+# log_save_path: "D:/RL/deploy/logs/SII_model_56250_cz_origin_pos=0.5_keypoint=0.1_dt=0.001_numenv=10000" # 这个理论上应该跟踪的好一些，
+
+
+# 外部力参数
+apply_external_force: False                 # 是否施加外部力
+force_body_name: "pelvis"                   # 施加力的身体名称，例如 "torso", "base" 等
+force_start_time: 3.0                      # 外力开始施加的模拟时间（秒）
+force_duration: 2.0         #1.5               # 外力持续时间（秒）
+force_magnitude: 60.0    #100                 # 外力最大大小（牛顿）
+force_direction_world: [1.0, 0.0, 0.0]     # 外力在世界坐标系中的方向向量 [x, y, z] (会自动归一化)
+
+# 
