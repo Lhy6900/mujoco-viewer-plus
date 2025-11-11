@@ -452,50 +452,51 @@ if __name__ == "__main__":
                         pass
                 # ===== 奖励图表渲染结束 =====
 
-            # 同步viewer，刷新显示
-            # 清空user_scn中的geoms，为渲染其他环境做准备
-            viewer.user_scn.ngeom = 0
-            
-            # ===== 渲染主环境的 Ghost =====
-            if show_main_ghost.value:
-                try:
-                    idx = current_env_idx.value
-                    ghost_renderer_list[idx].render_ghost(viewer.user_scn)
-                except Exception as e:
-                    if timestep % 100 == 0:  # 每100步打印一次错误
-                        print(f"[警告] 主环境 Ghost 渲染失败: {e}")
-            # ===== 主环境 Ghost 渲染结束 =====
-            
-            # ===== 渲染其他环境的 Ghost =====
-            if show_other_ghosts.value:
-                for i in range(num_envs):
-                    if i == current_env_idx.value:
-                        continue  # 跳过主环境
+                #*******************ghost and multi robot part的更新频率（环境step or 策略 step）**********
+                # 同步viewer，刷新显示
+                # 清空user_scn中的geoms，为渲染其他环境做准备
+                viewer.user_scn.ngeom = 0
+                
+                # ===== 渲染主环境的 Ghost =====
+                if show_main_ghost.value:
                     try:
-                        ghost_renderer_list[i].render_ghost(viewer.user_scn)
+                        idx = current_env_idx.value
+                        ghost_renderer_list[idx].render_ghost(viewer.user_scn)
                     except Exception as e:
-                        if timestep % 100 == 0:
-                            print(f"[警告] 环境 {i} Ghost 渲染失败: {e}")
-            # ===== 其他环境 Ghost 渲染结束 =====
-            
-            # 只有在 show_other_envs 为 True 时才渲染其他环境
-            if show_other_envs.value:
-                # 渲染所有其他环境（除了主环境current_env_idx）
-                for i in range(num_envs):
-                    if i == current_env_idx.value:
-                        continue  # 跳过当前主环境（已经在viewer的主场景中显示）
-                    # 使用mjv_addGeoms将每个环境的机器人渲染到viewer中
-                    mujoco.mjv_addGeoms(
-                        m,           # 模型
-                        dlist[i],    # 该环境的数据
-                        vopt,        # 可视化选项
-                        pert,        # 扰动（未使用）
-                        catmask,     # 类别掩码（显示动态物体）
-                        viewer.user_scn  # 添加到viewer的用户场景中
-                    )
-            
-            
-            
+                        if timestep % 100 == 0:  # 每100步打印一次错误
+                            print(f"[警告] 主环境 Ghost 渲染失败: {e}")
+                # ===== 主环境 Ghost 渲染结束 =====
+                
+                # ===== 渲染其他环境的 Ghost =====
+                if show_other_ghosts.value:
+                    for i in range(num_envs):
+                        if i == current_env_idx.value:
+                            continue  # 跳过主环境
+                        try:
+                            ghost_renderer_list[i].render_ghost(viewer.user_scn)
+                        except Exception as e:
+                            if timestep % 100 == 0:
+                                print(f"[警告] 环境 {i} Ghost 渲染失败: {e}")
+                # ===== 其他环境 Ghost 渲染结束 =====
+                
+                # 只有在 show_other_envs 为 True 时才渲染其他环境
+                if show_other_envs.value:
+                    # 渲染所有其他环境（除了主环境current_env_idx）
+                    for i in range(num_envs):
+                        if i == current_env_idx.value:
+                            continue  # 跳过当前主环境（已经在viewer的主场景中显示）
+                        # 使用mjv_addGeoms将每个环境的机器人渲染到viewer中
+                        mujoco.mjv_addGeoms(
+                            m,           # 模型
+                            dlist[i],    # 该环境的数据
+                            vopt,        # 可视化选项
+                            pert,        # 扰动（未使用）
+                            catmask,     # 类别掩码（显示动态物体）
+                            viewer.user_scn  # 添加到viewer的用户场景中
+                        )
+                
+                
+                #********************************ghost and multi robot part******************
             viewer.sync()
             
             # 在 viewer.sync() 之后，检查用户是否通过交互施加了外力
