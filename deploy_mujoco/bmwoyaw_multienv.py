@@ -140,9 +140,11 @@ if __name__ == "__main__":
     ])
     print("[奖励可视化] RewardPlotter 已初始化，图表将显示在屏幕右侧")
     
-    # 初始化 Ghost 渲染器
-    ghost_renderer = GhostRenderer(m)
-    print("[Ghost 可视化] GhostRenderer 已初始化，将显示半透明绿色参考轨迹")
+    # 初始化 Ghost 渲染器列表 - 每个环境一个
+    ghost_renderer_list = []
+    for i in range(num_envs):
+        ghost_renderer_list.append(GhostRenderer(m))
+    print(f"[Ghost 可视化] 已为 {num_envs} 个环境初始化 GhostRenderer，将显示半透明绿色参考轨迹")
     
     # 多环境初始化，包括action_buffer,timestep,motion_input还有默认位置，注意下面两个for循环不能合并，timestep列表要先完成初始化
     action_buffer_list = []
@@ -180,7 +182,8 @@ if __name__ == "__main__":
     current_env_idx = Value('i', 0)  # 使用共享内存变量
     show_other_envs = Value('i', 0)  # 是否显示其他环境（0=不显示，1=显示）
     show_reward_plot = Value('i', 1)  # 是否显示奖励曲线（0=不显示，1=显示，默认显示）
-    show_ghost = Value('i', 1)  # 是否显示 ghost 参考轨迹（0=不显示，1=显示，默认显示）
+    show_main_ghost = Value('i', 1)  # 是否显示主环境的 ghost（0=不显示，1=显示，默认显示）
+    show_other_ghosts = Value('i', 0)  # 是否显示其他环境的 ghost（0=不显示，1=显示，默认不显示）
     
     # 用于检测 Ctrl 键状态
     ctrl_pressed = Value('i', 0)  # 0=未按下，1=已按下
@@ -192,6 +195,14 @@ if __name__ == "__main__":
     
     # 定义快捷键切换环境的回调函数
     def key_callback(key):
+        """
+        键盘快捷键：
+        - ↑/↓: 切换主环境
+        - M: 切换其他环境的机器人显示
+        - Ctrl+G: 切换主环境的 ghost 显示
+        - Ctrl+M: 切换其他环境的 ghost 显示
+        - Ctrl+R: 切换奖励曲线显示
+        """
         # 检测 Ctrl 键按下和释放
         if key == 341 or key == 345:  # GLFW_KEY_LEFT_CONTROL 或 GLFW_KEY_RIGHT_CONTROL
             ctrl_pressed.value = 1
@@ -205,22 +216,30 @@ if __name__ == "__main__":
         elif key == 264:  # GLFW_KEY_DOWN
             current_env_idx.value = (current_env_idx.value + 1) % num_envs
             print(f"[切换环境] 当前主环境: {current_env_idx.value}")
-        # M键 - 切换是否显示其他环境
+        # M键 - 切换其他环境的机器人显示
         elif key == 77 or key == 109:  # 'M' 或 'm'
-            show_other_envs.value = 1 - show_other_envs.value
-            status = "显示" if show_other_envs.value else "隐藏"
-            print(f"[多环境渲染] {status}其他环境")
+            if ctrl_pressed.value:
+                # Ctrl+M - 切换其他环境的 ghost 显示
+                show_other_ghosts.value = 1 - show_other_ghosts.value
+                status = "显示" if show_other_ghosts.value else "隐藏"
+                print(f"[Ghost 可视化] {status}其他环境的参考轨迹")
+                ctrl_pressed.value = 0  # 重置 Ctrl 状态
+            else:
+                # M - 切换其他环境的机器人显示
+                show_other_envs.value = 1 - show_other_envs.value
+                status = "显示" if show_other_envs.value else "隐藏"
+                print(f"[多环境渲染] {status}其他环境")
+        # Ctrl+G - 切换主环境的 ghost 显示
+        elif (key == 71 or key == 103) and ctrl_pressed.value:  # 'G' 或 'g' + Ctrl
+            show_main_ghost.value = 1 - show_main_ghost.value
+            status = "显示" if show_main_ghost.value else "隐藏"
+            print(f"[Ghost 可视化] {status}主环境的参考轨迹")
+            ctrl_pressed.value = 0  # 重置 Ctrl 状态
         # Ctrl+R - 切换奖励曲线显示
         elif (key == 82 or key == 114) and ctrl_pressed.value:  # 'R' 或 'r' + Ctrl
             show_reward_plot.value = 1 - show_reward_plot.value
             status = "显示" if show_reward_plot.value else "隐藏"
             print(f"[奖励可视化] {status}奖励曲线窗口")
-            ctrl_pressed.value = 0  # 重置 Ctrl 状态
-        # Ctrl+G - 切换 ghost 显示
-        elif (key == 71 or key == 103) and ctrl_pressed.value:  # 'G' 或 'g' + Ctrl
-            show_ghost.value = 1 - show_ghost.value
-            status = "显示" if show_ghost.value else "隐藏"
-            print(f"[Ghost 可视化] {status}参考轨迹")
             ctrl_pressed.value = 0  # 重置 Ctrl 状态
     
     # 启动mujoco可视化窗口，传入键盘回调
@@ -311,50 +330,72 @@ if __name__ == "__main__":
                     print(f"[警告] 奖励计算失败: {e}")
                 # ===== 奖励计算结束 =====
                 
-                # ===== 构造 Ghost Qpos（新增）=====
-                try:
-                    # 使用 policy.run 获取 body_pos_w 和 body_quat_w
-                    ghost_outputs = policy.run(
-                        ['body_pos_w', 'body_quat_w'],
-                        {
-                            'obs': obs_tensor.numpy(),
-                            'time_step': np.array([timestep], dtype=np.float32).reshape(1,1)
-                        }
-                    )
-                    
-                    # 从返回的列表中提取数据
-                    policy_body_pos_w = ghost_outputs[0]   # (1, 14, 3)
-                    policy_body_quat_w = ghost_outputs[1]  # (1, 14, 4)
-                    
-                    # 从 policy 输出提取 root 位置和姿态
-                    # 使用第一个 body（索引 0）作为 base/root
-                    base_pos_policy = policy_body_pos_w[0, 0, :]  # (3,) - XYZ 位置
-                    base_quat_policy = policy_body_quat_w[0, 0, :]  # (4,) - 四元数    
-                    base_quat_mujoco = base_quat_policy
-                    
-                    # 提取参考轨迹的关节角度（joint_seq 顺序）
-                    joint_pos_ref_seq = motionrefinputpos[timestep, :]  # (num_joints,)
-                    
-                    # 转换为 dof 顺序（joint_xml 顺序）
-                    ghost_joint_pos_dof = np.array([
-                        joint_pos_ref_seq[joint_seq.index(joint)] 
-                        for joint in joint_xml
-                    ])
-                    
-                    # 构造完整的 ghost_qpos
-                    ghost_qpos = ghost_renderer.construct_ghost_qpos(
-                        base_pos=base_pos_policy,
-                        base_quat=base_quat_mujoco,
-                        joint_pos_dof_order=ghost_joint_pos_dof,
-                        current_qpos=d.qpos
-                    )
-                    
-                    # 设置 ghost 姿态
-                    ghost_renderer.set_ghost_qpos(ghost_qpos)
-                    
-                except Exception as e:
-                    if timestep % 100 == 0:  # 每100步打印一次错误
-                        print(f"[警告] Ghost qpos 构造失败: {e}")
+                # ===== 为所有环境构造 Ghost Qpos（新增）=====
+                # 遍历所有环境，为每个环境构造其 ghost
+                for env_i in range(num_envs):
+                    try:
+                        timestep_i = timestep_list[env_i]
+                        
+                        # 为每个环境准备观测数据
+                        motioninput_i = np.concatenate((motionrefinputpos[timestep_i,:], motionrefinputvel[timestep_i,:]), axis=0)
+                        obs_i = np.zeros(num_obs, dtype=np.float32)
+                        obs_i[0:58] = motioninput_i
+                        obs_i[58:61] = dlist[env_i].qvel[3:6]
+                        qpos_xml_i = dlist[env_i].qpos[7:7+num_actions]
+                        qpos_seq_i = np.array([qpos_xml_i[joint_xml.index(joint)] for joint in joint_seq])
+                        obs_i[61:90] = qpos_seq_i - joint_pos_array_seq
+                        qvel_xml_i = dlist[env_i].qvel[6:6+num_actions]
+                        qvel_seq_i = np.array([qvel_xml_i[joint_xml.index(joint)] for joint in joint_seq])
+                        obs_i[90:119] = qvel_seq_i
+                        obs_i[119:148] = action_buffer_list[env_i]
+                        obs_tensor_i = torch.from_numpy(obs_i).unsqueeze(0)
+                        
+                        # 使用对应的 policy 获取 body_pos_w 和 body_quat_w
+                        ghost_outputs = policy_list[env_i].run(
+                            ['body_pos_w', 'body_quat_w'],
+                            {
+                                'obs': obs_tensor_i.numpy(),
+                                'time_step': np.array([timestep_i], dtype=np.float32).reshape(1,1)
+                            }
+                        )
+                        
+                        # 从返回的列表中提取数据
+                        policy_body_pos_w = ghost_outputs[0]   # (1, 14, 3)
+                        policy_body_quat_w = ghost_outputs[1]  # (1, 14, 4)
+                        
+                        # 从 policy 输出提取 root 位置和姿态
+                        base_pos_policy = policy_body_pos_w[0, 0, :]  # (3,) - XYZ 位置
+                        base_quat_policy = policy_body_quat_w[0, 0, :]  # (4,) - 四元数
+                        
+                        # ⚠️ 重要：将 ghost 位置偏移到对应环境的 env_origins
+                        # policy 输出的位置是相对于原点的，需要加上环境偏移
+                        base_pos_with_offset = base_pos_policy.copy()
+                        base_pos_with_offset[0] += env_origins[env_i, 0]  # X 方向偏移
+                        base_pos_with_offset[1] += env_origins[env_i, 1]  # Y 方向偏移
+                        
+                        # 提取参考轨迹的关节角度（joint_seq 顺序）
+                        joint_pos_ref_seq = motionrefinputpos[timestep_i, :]  # (num_joints,)
+                        
+                        # 转换为 dof 顺序（joint_xml 顺序）
+                        ghost_joint_pos_dof = np.array([
+                            joint_pos_ref_seq[joint_seq.index(joint)] 
+                            for joint in joint_xml
+                        ])
+                        
+                        # 构造完整的 ghost_qpos（使用加了偏移的位置）
+                        ghost_qpos = ghost_renderer_list[env_i].construct_ghost_qpos(
+                            base_pos=base_pos_with_offset,  # 使用加了偏移的位置
+                            base_quat=base_quat_policy,
+                            joint_pos_dof_order=ghost_joint_pos_dof,
+                            current_qpos=dlist[env_i].qpos
+                        )
+                        
+                        # 设置 ghost 姿态
+                        ghost_renderer_list[env_i].set_ghost_qpos(ghost_qpos)
+                        
+                    except Exception as e:
+                        if timestep % 100 == 0:  # 每100步打印一次错误
+                            print(f"[警告] 环境 {env_i} Ghost qpos 构造失败: {e}")
                 # ===== Ghost Qpos 构造结束 =====
                 
                 # 时间步加1，准备处理下一帧数据
@@ -415,14 +456,27 @@ if __name__ == "__main__":
             # 清空user_scn中的geoms，为渲染其他环境做准备
             viewer.user_scn.ngeom = 0
             
-            # ===== 渲染 Ghost（新增）=====
-            if show_ghost.value:
+            # ===== 渲染主环境的 Ghost =====
+            if show_main_ghost.value:
                 try:
-                    ghost_renderer.render_ghost(viewer.user_scn)
+                    idx = current_env_idx.value
+                    ghost_renderer_list[idx].render_ghost(viewer.user_scn)
                 except Exception as e:
                     if timestep % 100 == 0:  # 每100步打印一次错误
-                        print(f"[警告] Ghost 渲染失败: {e}")
-            # ===== Ghost 渲染结束 =====
+                        print(f"[警告] 主环境 Ghost 渲染失败: {e}")
+            # ===== 主环境 Ghost 渲染结束 =====
+            
+            # ===== 渲染其他环境的 Ghost =====
+            if show_other_ghosts.value:
+                for i in range(num_envs):
+                    if i == current_env_idx.value:
+                        continue  # 跳过主环境
+                    try:
+                        ghost_renderer_list[i].render_ghost(viewer.user_scn)
+                    except Exception as e:
+                        if timestep % 100 == 0:
+                            print(f"[警告] 环境 {i} Ghost 渲染失败: {e}")
+            # ===== 其他环境 Ghost 渲染结束 =====
             
             # 只有在 show_other_envs 为 True 时才渲染其他环境
             if show_other_envs.value:
