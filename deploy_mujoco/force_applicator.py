@@ -26,6 +26,9 @@ class ForceApplicator:
                 - 'stop': 停止模式，可选值：
                     * 'fixtime': 固定时间后自动停止（默认）
                     * 'keeping': 持续施加直到手动停止（再次按 Ctrl+F）
+                - 'style': 力的施加方式，可选值：
+                    * 'constant': 恒定力，大小和方向固定（默认）
+                    * 'spring': 弹簧力，引力中心固定，力大小和方向动态计算
         """
         self.model = model
         self.body_name = body_name
@@ -48,7 +51,7 @@ class ForceApplicator:
         
         # 外力模式配置
         if force_mode is None:
-            self.force_mode = {'stop': 'fixtime'}  # 默认固定时间模式
+            self.force_mode = {'stop': 'fixtime', 'style': 'constant'}  # 默认模式
         else:
             self.force_mode = force_mode.copy()
             # 验证 stop 模式
@@ -56,18 +59,32 @@ class ForceApplicator:
                 self.force_mode['stop'] = 'fixtime'
             elif self.force_mode['stop'] not in ['fixtime', 'keeping']:
                 raise ValueError(f"Invalid force_mode['stop']='{self.force_mode['stop']}', must be 'fixtime' or 'keeping'")
+            # 验证 style 模式
+            if 'style' not in self.force_mode:
+                self.force_mode['style'] = 'constant'
+            elif self.force_mode['style'] not in ['constant', 'spring']:
+                raise ValueError(f"Invalid force_mode['style']='{self.force_mode['style']}', must be 'constant' or 'spring'")
         
         # 外力施加状态
         self.is_active = False
         self.start_time = 0.0
         self.duration = 5.0  # 默认持续时间 5 秒（仅在 fixtime 模式下使用）
         
-        # 外力参数
+        # 恒定力参数（constant 模式）
         self.force_magnitude = 20.0  # N
         self.force_direction = np.array([0.0, 1.0, 0.0])  # Y 正方向
         
+        # 弹簧力参数（spring 模式）
+        self.spring_k = 50.0  # 弹簧系数 K
+        self.spring_center_bias = np.array([0.2, 0.2, 0.0])  # 引力中心偏置
+        self.spring_centers = []  # 每个环境的引力中心 (num_envs, 3)，在 trigger 时初始化
+        
         print(f"[ForceApplicator] 已初始化，目标 body: {self.body_name} (ID: {self.body_id})")
         print(f"  - 停止模式: {self.force_mode['stop']}")
+        print(f"  - 力的风格: {self.force_mode['style']}")
+        if self.force_mode['style'] == 'spring':
+            print(f"  - 弹簧系数 K: {self.spring_k}")
+            print(f"  - 引力中心偏置: {self.spring_center_bias}")
 
     
     def trigger(self, duration=5.0, force_magnitude=20.0, force_direction=None, data_list=None):
@@ -76,9 +93,9 @@ class ForceApplicator:
         
         Args:
             duration: 持续时间（秒），仅在 fixtime 模式下使用
-            force_magnitude: 力的大小（N）
-            force_direction: 力的方向（归一化的 3D 向量），默认 Y 正方向
-            data_list: mujoco.MjData 对象列表（用于 keeping 模式切换时清除外力）
+            force_magnitude: 力的大小（N），仅在 constant 模式下使用
+            force_direction: 力的方向（归一化的 3D 向量），仅在 constant 模式下使用，默认 Y 正方向
+            data_list: mujoco.MjData 对象列表（用于 keeping 模式切换和 spring 模式初始化）
         """
         # 在 keeping 模式下，如果已经激活，则切换为停止
         if self.force_mode['stop'] == 'keeping' and self.is_active:
@@ -95,22 +112,49 @@ class ForceApplicator:
         self.duration = duration
         self.force_magnitude = force_magnitude
         
-        if force_direction is not None:
-            # 归一化方向向量
-            norm = np.linalg.norm(force_direction)
-            if norm > 1e-6:
-                self.force_direction = force_direction / norm
-            else:
-                self.force_direction = np.array([0.0, 1.0, 0.0])
+        # constant 模式：设置恒定力的方向
+        if self.force_mode['style'] == 'constant':
+            if force_direction is not None:
+                # 归一化方向向量
+                norm = np.linalg.norm(force_direction)
+                if norm > 1e-6:
+                    self.force_direction = force_direction / norm
+                else:
+                    self.force_direction = np.array([0.0, 1.0, 0.0])
         
+        # spring 模式：计算每个环境的引力中心
+        elif self.force_mode['style'] == 'spring':
+            if data_list is None:
+                raise ValueError("spring 模式需要提供 data_list 来计算引力中心")
+            
+            self.spring_centers = []
+            for env_i, data in enumerate(data_list):
+                # 获取当前环境中 body 的全局位置
+                body_pos = data.xpos[self.body_id].copy()
+                # 计算引力中心 = body 位置 + 偏置
+                spring_center = body_pos + self.spring_center_bias
+                self.spring_centers.append(spring_center)
+            
+            print(f"[ForceApplicator] Spring 模式：已计算 {len(self.spring_centers)} 个环境的引力中心")
+            if len(self.spring_centers) > 0:
+                print(f"  - 环境 0 引力中心: {self.spring_centers[0]}")
+        
+        # 打印触发信息
         print(f"[ForceApplicator] 触发外力施加：")
-        print(f"  - 模式: {self.force_mode['stop']}")
+        print(f"  - 停止模式: {self.force_mode['stop']}")
+        print(f"  - 力的风格: {self.force_mode['style']}")
+        
         if self.force_mode['stop'] == 'fixtime':
             print(f"  - 持续时间: {duration:.1f}s")
         else:
             print(f"  - 持续时间: 持续施加直到再次按 Ctrl+F")
-        print(f"  - 力大小: {force_magnitude:.1f}N")
-        print(f"  - 力方向: {self.force_direction}")
+        
+        if self.force_mode['style'] == 'constant':
+            print(f"  - 力大小: {force_magnitude:.1f}N")
+            print(f"  - 力方向: {self.force_direction}")
+        else:  # spring
+            print(f"  - 弹簧系数: {self.spring_k}")
+            print(f"  - 引力中心偏置: {self.spring_center_bias}")
     
     def update(self, data_list):
         """
@@ -132,15 +176,48 @@ class ForceApplicator:
                 self.stop(data_list)
                 return False
         
-        # 计算外力向量
-        force_vector = self.force_direction * self.force_magnitude
+        # 根据 style 模式计算并施加外力
+        if self.force_mode['style'] == 'constant':
+            # 恒定力模式：所有环境施加相同的力
+            force_vector = self.force_direction * self.force_magnitude
+            
+            for data in data_list:
+                # xfrc_applied 的形状是 (nbody, 6)
+                # 前3个是力 (force)，后3个是力矩 (torque)
+                data.xfrc_applied[self.body_id, 0:3] = force_vector
+                data.xfrc_applied[self.body_id, 3:6] = 0.0  # 不施加力矩
         
-        # 对所有环境施加外力
-        for data in data_list:
-            # xfrc_applied 的形状是 (nbody, 6)
-            # 前3个是力 (force)，后3个是力矩 (torque)
-            data.xfrc_applied[self.body_id, 0:3] = force_vector
-            data.xfrc_applied[self.body_id, 3:6] = 0.0  # 不施加力矩
+        elif self.force_mode['style'] == 'spring':
+            # 弹簧力模式：每个环境单独计算力
+            for env_i, data in enumerate(data_list):
+                # 获取当前 body 位置
+                body_pos = data.xpos[self.body_id]
+                
+                # 获取该环境的引力中心
+                if env_i < len(self.spring_centers):
+                    spring_center = self.spring_centers[env_i]
+                else:
+                    # 如果没有预先计算的引力中心，使用当前位置+偏置
+                    spring_center = body_pos + self.spring_center_bias
+                
+                # 计算从 body 指向引力中心的向量
+                direction_vec = spring_center - body_pos
+                distance = np.linalg.norm(direction_vec)
+                
+                if distance > 1e-6:
+                    # 归一化方向
+                    direction_normalized = direction_vec / distance
+                    # 计算弹簧力大小 F = K * distance
+                    force_magnitude = self.spring_k * distance
+                    # 计算力向量
+                    force_vector = direction_normalized * force_magnitude
+                else:
+                    # 距离太小，不施加力
+                    force_vector = np.zeros(3)
+                
+                # 施加外力
+                data.xfrc_applied[self.body_id, 0:3] = force_vector
+                data.xfrc_applied[self.body_id, 3:6] = 0.0  # 不施加力矩
         
         return True
     
@@ -160,21 +237,38 @@ class ForceApplicator:
         for data in data_list:
             data.xfrc_applied[self.body_id, :] = 0.0
         
+        # 清零弹簧引力中心（spring 模式）
+        self.spring_centers = []
+        
         print(f"[ForceApplicator] 外力施加结束")
     
-    def get_force_info(self):
+    def get_force_info(self, data_list=None):
         """
         获取当前外力信息（用于可视化）
         
+        Args:
+            data_list: mujoco.MjData 对象列表（spring 模式需要用于计算实时力向量）
+        
         Returns:
-            dict: 包含 body_id, force_vector, is_active, remaining_time 等信息
+            dict: 包含 body_id, force_vectors, is_active, remaining_time 等信息
                   如果未激活，返回 None
+                  
+                  返回字典结构：
+                  - 'body_id': body 的索引
+                  - 'body_name': body 的名称
+                  - 'is_active': 是否激活
+                  - 'mode': 停止模式 ('fixtime' 或 'keeping')
+                  - 'style': 力的风格 ('constant' 或 'spring')
+                  - 'force_vectors': 力向量列表，每个环境一个 (num_envs, 3)
+                  - 'elapsed_time': 已经过时间
+                  - 'remaining_time': 剩余时间（fixtime 模式）或 inf（keeping 模式）
+                  - 'duration': 持续时间（fixtime 模式）或 None（keeping 模式）
+                  - 'spring_centers': 引力中心列表（仅 spring 模式）
         """
         if not self.is_active:
             return None
         
         elapsed_time = time.time() - self.start_time
-        force_vector = self.force_direction * self.force_magnitude
         
         # 根据模式计算剩余时间
         if self.force_mode['stop'] == 'fixtime':
@@ -182,13 +276,58 @@ class ForceApplicator:
         else:  # keeping 模式
             remaining_time = float('inf')  # 无限持续
         
-        return {
+        # 根据 style 计算力向量
+        force_vectors = []
+        
+        if self.force_mode['style'] == 'constant':
+            # 恒定力模式：所有环境相同的力向量
+            force_vector = self.force_direction * self.force_magnitude
+            # 如果提供了 data_list，为每个环境返回相同的力向量
+            if data_list is not None:
+                force_vectors = [force_vector.copy() for _ in data_list]
+            else:
+                force_vectors = [force_vector]
+        
+        elif self.force_mode['style'] == 'spring':
+            # 弹簧力模式：每个环境不同的力向量
+            if data_list is None:
+                # 如果没有 data_list，无法计算实时力向量
+                force_vectors = []
+            else:
+                for env_i, data in enumerate(data_list):
+                    body_pos = data.xpos[self.body_id]
+                    
+                    if env_i < len(self.spring_centers):
+                        spring_center = self.spring_centers[env_i]
+                    else:
+                        spring_center = body_pos + self.spring_center_bias
+                    
+                    direction_vec = spring_center - body_pos
+                    distance = np.linalg.norm(direction_vec)
+                    
+                    if distance > 1e-6:
+                        direction_normalized = direction_vec / distance
+                        force_magnitude = self.spring_k * distance
+                        force_vector = direction_normalized * force_magnitude
+                    else:
+                        force_vector = np.zeros(3)
+                    
+                    force_vectors.append(force_vector)
+        
+        result = {
             'body_id': self.body_id,
             'body_name': self.body_name,
-            'force_vector': force_vector,
             'is_active': self.is_active,
+            'mode': self.force_mode['stop'],
+            'style': self.force_mode['style'],
+            'force_vectors': force_vectors,  # 每个环境的力向量列表
             'elapsed_time': elapsed_time,
             'remaining_time': remaining_time,
             'duration': self.duration if self.force_mode['stop'] == 'fixtime' else None,
-            'mode': self.force_mode['stop']
         }
+        
+        # 如果是 spring 模式，添加引力中心信息
+        if self.force_mode['style'] == 'spring':
+            result['spring_centers'] = self.spring_centers
+        
+        return result

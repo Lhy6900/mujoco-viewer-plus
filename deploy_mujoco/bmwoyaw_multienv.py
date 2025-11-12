@@ -156,8 +156,13 @@ if __name__ == "__main__":
 
     # 初始化外力施加器和可视化器
     # 使用 force_anchor_bodyidx 参数指定施加外力的锚点
-    # force_mode 配置外力停止模式：'fixtime' 或 'keeping'
-    force_mode = {'stop': 'fixtime'}  # 可选：'fixtime' 或 'keeping'
+    # force_mode 配置：
+    #   - stop: 'fixtime' 或 'keeping' - 控制外力的开始/停止
+    #   - style: 'constant' 或 'spring' - 控制外力的计算方式
+    force_mode = {
+        'stop': 'keeping',   # 'fixtime': 固定时间停止 | 'keeping': 持续直到再次按键
+        'style': 'spring'    # 'constant': 恒定力 | 'spring': 弹簧力
+    }
     try:
         force_applicator = ForceApplicator(
             m, 
@@ -173,10 +178,19 @@ if __name__ == "__main__":
     
     force_visualizer = ForceVisualizer()
     print("[外力系统] 已初始化 ForceApplicator 和 ForceVisualizer")
+    
+    # 根据配置打印提示信息
     if force_mode['stop'] == 'fixtime':
-        print("  └─ 按 Ctrl+F 施加外力（Y 方向 20N，持续 5 秒）")
+        duration_msg = "持续 5 秒"
     else:
-        print("  └─ 按 Ctrl+F 施加/停止外力（Y 方向 20N，持续直到再次按 Ctrl+F）")
+        duration_msg = "持续直到再次按 Ctrl+F"
+    
+    if force_mode['style'] == 'constant':
+        force_msg = "Y 方向 20N"
+    else:
+        force_msg = "弹簧力（K=50）"
+    
+    print(f"  └─ 按 Ctrl+F 施加/停止外力（{force_msg}，{duration_msg}）")
 
 
     
@@ -521,37 +535,41 @@ if __name__ == "__main__":
                 
                 # ===== 渲染外力箭头 =====
                 # 获取当前外力信息并渲染箭头
-                force_info = force_applicator.get_force_info()
+                force_info = force_applicator.get_force_info(data_list=dlist)
                 if force_info is not None:
+                    force_vectors = force_info['force_vectors']
+                    
                     # 默认只渲染主环境的外力
-                    try:
-                        force_visualizer.render_force_arrow(
-                            viewer.user_scn,
-                            m,
-                            dlist[current_env_idx.value],
-                            force_info['body_id'],
-                            force_info['force_vector']
-                        )
-                    except Exception as e:
-                        if timestep % 100 == 0:
-                            print(f"[警告] 主环境外力箭头渲染失败: {e}")
+                    if len(force_vectors) > current_env_idx.value:
+                        try:
+                            force_visualizer.render_force_arrow(
+                                viewer.user_scn,
+                                m,
+                                dlist[current_env_idx.value],
+                                force_info['body_id'],
+                                force_vectors[current_env_idx.value]
+                            )
+                        except Exception as e:
+                            if timestep % 100 == 0:
+                                print(f"[警告] 主环境外力箭头渲染失败: {e}")
                     
                     # 只有在 show_other_envs 为 True 时才渲染其他环境的外力
                     if show_other_envs.value:
                         for env_i in range(num_envs):
                             if env_i == current_env_idx.value:
                                 continue  # 跳过主环境（已经渲染过）
-                            try:
-                                force_visualizer.render_force_arrow(
-                                    viewer.user_scn,
-                                    m,
-                                    dlist[env_i],
-                                    force_info['body_id'],
-                                    force_info['force_vector']
-                                )
-                            except Exception as e:
-                                if timestep % 100 == 0:
-                                    print(f"[警告] 环境 {env_i} 外力箭头渲染失败: {e}")
+                            if env_i < len(force_vectors):
+                                try:
+                                    force_visualizer.render_force_arrow(
+                                        viewer.user_scn,
+                                        m,
+                                        dlist[env_i],
+                                        force_info['body_id'],
+                                        force_vectors[env_i]
+                                    )
+                                except Exception as e:
+                                    if timestep % 100 == 0:
+                                        print(f"[警告] 环境 {env_i} 外力箭头渲染失败: {e}")
                 # ===== 外力箭头渲染结束 =====
 
                 
