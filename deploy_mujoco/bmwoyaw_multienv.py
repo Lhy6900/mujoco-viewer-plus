@@ -159,9 +159,15 @@ if __name__ == "__main__":
     # force_mode 配置：
     #   - stop: 'fixtime' 或 'keeping' - 控制外力的开始/停止
     #   - style: 'constant' 或 'spring' - 控制外力的计算方式
+    #   - select: 控制哪些环境施加外力
+    #       * None: 不对任何环境施加外力
+    #       * 0: 仅对第0个环境施加外力
+    #       * 1: 对所有环境施加外力
+    #       * [0, 2, 3]: 对列表中索引对应的环境施加外力
     force_mode = {
         'stop': 'keeping',   # 'fixtime': 固定时间停止 | 'keeping': 持续直到再次按键
-        'style': 'spring'    # 'constant': 恒定力 | 'spring': 弹簧力
+        'style': 'spring',   # 'constant': 恒定力 | 'spring': 弹簧力
+        'select': None     # 测试：只对环境0和2施加外力
     }
     try:
         force_applicator = ForceApplicator(
@@ -522,7 +528,7 @@ if __name__ == "__main__":
                 # ===== 主环境 Ghost 渲染结束 =====
                 
                 # ===== 渲染其他环境的 Ghost =====
-                if show_other_ghosts.value:
+                if show_other_ghosts.value and show_other_envs.value:
                     for i in range(num_envs):
                         if i == current_env_idx.value:
                             continue  # 跳过主环境
