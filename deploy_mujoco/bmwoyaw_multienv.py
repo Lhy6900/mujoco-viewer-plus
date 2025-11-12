@@ -34,12 +34,28 @@ if __name__ == "__main__":
     # 加载 ONNX 模型
     model = onnx.load(model_path)
 
-    # 加载运动参考数据
-    motionref = np.load(motion_ref_path)
-    motionrefpos = motionref["body_pos_w"]
-    motionrefquat = motionref["body_quat_w"]
-    motionrefinputpos = motionref["joint_pos"]
-    motionrefinputvel = motionref["joint_vel"]
+    # 尝试加载运动参考数据（用于模仿学习策略）
+    # 如果没有参考运动数据，Ghost 渲染功能将自动禁用
+    ghost_rendering_enabled = False
+    motionrefpos = None
+    motionrefquat = None
+    motionrefinputpos = None
+    motionrefinputvel = None
+    
+    try:
+        motionref = np.load(motion_ref_path)
+        motionrefpos = motionref["body_pos_w"]
+        motionrefquat = motionref["body_quat_w"]
+        motionrefinputpos = motionref["joint_pos"]
+        motionrefinputvel = motionref["joint_vel"]
+        ghost_rendering_enabled = True
+        print(f"[参考运动] 成功加载参考运动数据：{motion_ref_path}")
+    except FileNotFoundError:
+        print(f"[参考运动] 未找到参考运动文件：{motion_ref_path}")
+        print(f"[参考运动] Ghost 渲染功能已禁用（适用于非模仿学习策略）")
+    except Exception as e:
+        print(f"[参考运动] 加载参考运动数据失败：{e}")
+        print(f"[参考运动] Ghost 渲染功能已禁用")
 
     # 从模型元数据中读取配置
     for prop in model.metadata_props:
@@ -143,11 +159,14 @@ if __name__ == "__main__":
     ])
     print("[奖励可视化] RewardPlotter 已初始化，图表将显示在屏幕右侧")
     
-    # 初始化 Ghost 渲染器列表 - 每个环境一个
+    # 初始化 Ghost 渲染器列表（仅在启用时）
     ghost_renderer_list = []
-    for i in range(num_envs):
-        ghost_renderer_list.append(GhostRenderer(m))
-    print(f"[Ghost 可视化] 已为 {num_envs} 个环境初始化 GhostRenderer，将显示半透明绿色参考轨迹")
+    if ghost_rendering_enabled:
+        for i in range(num_envs):
+            ghost_renderer_list.append(GhostRenderer(m))
+        print(f"[Ghost 可视化] 已为 {num_envs} 个环境初始化 GhostRenderer，将显示半透明绿色参考轨迹")
+    else:
+        print(f"[Ghost 可视化] Ghost 渲染已禁用（无参考运动数据）")
     
     # 获取body id（用于外力施加）
     body_id = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, force_anchor_bodyname)
@@ -167,7 +186,7 @@ if __name__ == "__main__":
     force_mode = {
         'stop': 'keeping',   # 'fixtime': 固定时间停止 | 'keeping': 持续直到再次按键
         'style': 'spring',   # 'constant': 恒定力 | 'spring': 弹簧力
-        'select': None     # 测试：只对环境0和2施加外力
+        'select': 0     # 只对环境0和2施加外力（测试用）
     }
     try:
         force_applicator = ForceApplicator(
@@ -206,26 +225,48 @@ if __name__ == "__main__":
     for i in range(num_envs):
         action_buffer_list.append( np.zeros((num_actions,), dtype=np.float32))
         timestep_list.append(0)
-    motioninput = np.concatenate((motionrefinputpos[timestep,:],motionrefinputvel[timestep,:]), axis=0)
-    motionposcurrent = motionrefpos[timestep,9,:]
-    motionquatcurrent = motionrefquat[timestep,9,:]
+    
+    # 初始化参考运动输入（仅在启用 Ghost 时需要）
+    if ghost_rendering_enabled:
+        motioninput = np.concatenate((motionrefinputpos[timestep,:],motionrefinputvel[timestep,:]), axis=0)
+        motionposcurrent = motionrefpos[timestep,9,:]
+        motionquatcurrent = motionrefquat[timestep,9,:]
+    else:
+        # 非模仿学习策略：使用零值或其他默认值
+        motioninput = np.zeros((num_actions,), dtype=np.float32)  # 根据实际需要调整
+        motionposcurrent = np.zeros(3, dtype=np.float32)
+        motionquatcurrent = np.array([0, 0, 0, 1], dtype=np.float32)  # 单位四元数
     motion_input_list = []
     motionposcurrent_list = []
     motionquatcurrent_list = []
     target_dof_pos_list = []
-    for i in range(num_envs):
-        timestep_i = timestep_list[i]
-        motioninput_i = np.concatenate((motionrefinputpos[timestep_i,:],motionrefinputvel[timestep_i,:]), axis=0)
-        motionposcurrent_i = motionrefpos[timestep_i,9,:]
-        motionquatcurrent_i = motionrefquat[timestep_i,9,:]
-        motion_input_list.append(motioninput_i)
-        motionposcurrent_list.append(motionposcurrent_i)
-        motionquatcurrent_list.append(motionquatcurrent_i)
-        target_dof_pos_list.append(joint_pos_array.copy())
-        dlist[i].qpos[7:] = target_dof_pos_list[i]
-        # 使用网格布局设置每个环境的初始位置
-        dlist[i].qpos[0] = env_origins[i, 0]  # x 位置
-        dlist[i].qpos[1] = env_origins[i, 1]  # y 位置
+    
+    if ghost_rendering_enabled:
+        # 模仿学习策略：使用参考运动数据初始化
+        for i in range(num_envs):
+            timestep_i = timestep_list[i]
+            motioninput_i = np.concatenate((motionrefinputpos[timestep_i,:],motionrefinputvel[timestep_i,:]), axis=0)
+            motionposcurrent_i = motionrefpos[timestep_i,9,:]
+            motionquatcurrent_i = motionrefquat[timestep_i,9,:]
+            motion_input_list.append(motioninput_i)
+            motionposcurrent_list.append(motionposcurrent_i)
+            motionquatcurrent_list.append(motionquatcurrent_i)
+            target_dof_pos_list.append(joint_pos_array.copy())
+            dlist[i].qpos[7:] = target_dof_pos_list[i]
+            # 使用网格布局设置每个环境的初始位置
+            dlist[i].qpos[0] = env_origins[i, 0]  # x 位置
+            dlist[i].qpos[1] = env_origins[i, 1]  # y 位置
+    else:
+        # 非模仿学习策略：使用机器人默认初始配置
+        for i in range(num_envs):
+            motion_input_list.append(motioninput.copy())
+            motionposcurrent_list.append(motionposcurrent.copy())
+            motionquatcurrent_list.append(motionquatcurrent.copy())
+            target_dof_pos_list.append(joint_pos_array.copy())
+            dlist[i].qpos[7:] = target_dof_pos_list[i]
+            # 使用网格布局设置每个环境的初始位置
+            dlist[i].qpos[0] = env_origins[i, 0]  # x 位置
+            dlist[i].qpos[1] = env_origins[i, 1]  # y 位置
     
     # 当前选择的主环境索引（用于交互）
     current_env_idx = Value('i', 0)  # 使用共享内存变量
@@ -325,22 +366,25 @@ if __name__ == "__main__":
                 dlist[i].ctrl[:] = tau_i
                 mujoco.mj_step(m, dlist[i])
             
-            # ===== 更新外力施加器（新增）=====
-            force_applicator.update(dlist)
-            # ===== 外力施加器更新结束 =====
-            
             # counter 共用
             counter += 1
             if counter % control_decimation == 0:  # 每隔control_decimation步更新一次
-                position = d.xpos[body_id]
                 quaternion = d.qpos[3:7]
-                motioninput = np.concatenate((motionrefinputpos[timestep,:],motionrefinputvel[timestep,:]), axis=0)
-                motionposcurrent = motionrefpos[timestep,9,:]
-                motionquatcurrent = motionrefquat[timestep,9,:]
-                quaternion = np.array([quaternion[1], quaternion[2], quaternion[3], quaternion[0]])
-                motionquatcurrent = np.array([motionquatcurrent[1], motionquatcurrent[2], motionquatcurrent[3], motionquatcurrent[0]])
-                quat_rel = quat_invmul(quaternion, motionquatcurrent)
-                anchor_ori = get_orientation_2d_from_quat(quat_rel)
+                
+                # 更新参考运动数据（仅在启用 Ghost 时）
+                if ghost_rendering_enabled:
+                    motioninput = np.concatenate((motionrefinputpos[timestep,:],motionrefinputvel[timestep,:]), axis=0)
+                    motionposcurrent = motionrefpos[timestep,9,:]
+                    motionquatcurrent = motionrefquat[timestep,9,:]
+                    quaternion = np.array([quaternion[1], quaternion[2], quaternion[3], quaternion[0]])
+                    motionquatcurrent = np.array([motionquatcurrent[1], motionquatcurrent[2], motionquatcurrent[3], motionquatcurrent[0]])
+                    quat_rel = quat_invmul(quaternion, motionquatcurrent)
+                    anchor_ori = get_orientation_2d_from_quat(quat_rel)
+                else:
+                    # 非模仿学习策略：使用零值或其他观测方式
+                    quaternion = np.array([quaternion[1], quaternion[2], quaternion[3], quaternion[0]])
+                    anchor_ori = 0.0  # 或使用其他默认值
+                
                 obs[0:58] = motioninput
                 obs[58:61] = d.qvel[3 : 6]
                 qpos_xml = d.qpos[7 : 7 + num_actions]  # joint positions
@@ -390,72 +434,73 @@ if __name__ == "__main__":
                     print(f"[警告] 奖励计算失败: {e}")
                 # ===== 奖励计算结束 =====
                 
-                # ===== 为所有环境构造 Ghost Qpos（新增）=====
+                # ===== 为所有环境构造 Ghost Qpos（仅在启用时）=====
                 # 遍历所有环境，为每个环境构造其 ghost
-                for env_i in range(num_envs):
-                    try:
-                        timestep_i = timestep_list[env_i]
-                        
-                        # 为每个环境准备观测数据
-                        motioninput_i = np.concatenate((motionrefinputpos[timestep_i,:], motionrefinputvel[timestep_i,:]), axis=0)
-                        obs_i = np.zeros(num_obs, dtype=np.float32)
-                        obs_i[0:58] = motioninput_i
-                        obs_i[58:61] = dlist[env_i].qvel[3:6]
-                        qpos_xml_i = dlist[env_i].qpos[7:7+num_actions]
-                        qpos_seq_i = np.array([qpos_xml_i[joint_xml.index(joint)] for joint in joint_seq])
-                        obs_i[61:90] = qpos_seq_i - joint_pos_array_seq
-                        qvel_xml_i = dlist[env_i].qvel[6:6+num_actions]
-                        qvel_seq_i = np.array([qvel_xml_i[joint_xml.index(joint)] for joint in joint_seq])
-                        obs_i[90:119] = qvel_seq_i
-                        obs_i[119:148] = action_buffer_list[env_i]
-                        obs_tensor_i = torch.from_numpy(obs_i).unsqueeze(0)
-                        
-                        # 使用对应的 policy 获取 body_pos_w 和 body_quat_w
-                        ghost_outputs = policy_list[env_i].run(
-                            ['body_pos_w', 'body_quat_w'],
-                            {
-                                'obs': obs_tensor_i.numpy(),
-                                'time_step': np.array([timestep_i], dtype=np.float32).reshape(1,1)
-                            }
-                        )
-                        
-                        # 从返回的列表中提取数据
-                        policy_body_pos_w = ghost_outputs[0]   # (1, 14, 3)
-                        policy_body_quat_w = ghost_outputs[1]  # (1, 14, 4)
-                        
-                        # 从 policy 输出提取 root 位置和姿态
-                        base_pos_policy = policy_body_pos_w[0, 0, :]  # (3,) - XYZ 位置
-                        base_quat_policy = policy_body_quat_w[0, 0, :]  # (4,) - 四元数
-                        
-                        # ⚠️ 重要：将 ghost 位置偏移到对应环境的 env_origins
-                        # policy 输出的位置是相对于原点的，需要加上环境偏移
-                        base_pos_with_offset = base_pos_policy.copy()
-                        base_pos_with_offset[0] += env_origins[env_i, 0]  # X 方向偏移
-                        base_pos_with_offset[1] += env_origins[env_i, 1]  # Y 方向偏移
-                        
-                        # 提取参考轨迹的关节角度（joint_seq 顺序）
-                        joint_pos_ref_seq = motionrefinputpos[timestep_i, :]  # (num_joints,)
-                        
-                        # 转换为 dof 顺序（joint_xml 顺序）
-                        ghost_joint_pos_dof = np.array([
-                            joint_pos_ref_seq[joint_seq.index(joint)] 
-                            for joint in joint_xml
-                        ])
-                        
-                        # 构造完整的 ghost_qpos（使用加了偏移的位置）
-                        ghost_qpos = ghost_renderer_list[env_i].construct_ghost_qpos(
-                            base_pos=base_pos_with_offset,  # 使用加了偏移的位置
-                            base_quat=base_quat_policy,
-                            joint_pos_dof_order=ghost_joint_pos_dof,
-                            current_qpos=dlist[env_i].qpos
-                        )
-                        
-                        # 设置 ghost 姿态
-                        ghost_renderer_list[env_i].set_ghost_qpos(ghost_qpos)
-                        
-                    except Exception as e:
-                        if timestep % 100 == 0:  # 每100步打印一次错误
-                            print(f"[警告] 环境 {env_i} Ghost qpos 构造失败: {e}")
+                if ghost_rendering_enabled:
+                    for env_i in range(num_envs):
+                        try:
+                            timestep_i = timestep_list[env_i]
+                            
+                            # 为每个环境准备观测数据
+                            motioninput_i = np.concatenate((motionrefinputpos[timestep_i,:], motionrefinputvel[timestep_i,:]), axis=0)
+                            obs_i = np.zeros(num_obs, dtype=np.float32)
+                            obs_i[0:58] = motioninput_i
+                            obs_i[58:61] = dlist[env_i].qvel[3:6]
+                            qpos_xml_i = dlist[env_i].qpos[7:7+num_actions]
+                            qpos_seq_i = np.array([qpos_xml_i[joint_xml.index(joint)] for joint in joint_seq])
+                            obs_i[61:90] = qpos_seq_i - joint_pos_array_seq
+                            qvel_xml_i = dlist[env_i].qvel[6:6+num_actions]
+                            qvel_seq_i = np.array([qvel_xml_i[joint_xml.index(joint)] for joint in joint_seq])
+                            obs_i[90:119] = qvel_seq_i
+                            obs_i[119:148] = action_buffer_list[env_i]
+                            obs_tensor_i = torch.from_numpy(obs_i).unsqueeze(0)
+                            
+                            # 使用对应的 policy 获取 body_pos_w 和 body_quat_w
+                            ghost_outputs = policy_list[env_i].run(
+                                ['body_pos_w', 'body_quat_w'],
+                                {
+                                    'obs': obs_tensor_i.numpy(),
+                                    'time_step': np.array([timestep_i], dtype=np.float32).reshape(1,1)
+                                }
+                            )
+                            
+                            # 从返回的列表中提取数据
+                            policy_body_pos_w = ghost_outputs[0]   # (1, 14, 3)
+                            policy_body_quat_w = ghost_outputs[1]  # (1, 14, 4)
+                            
+                            # 从 policy 输出提取 root 位置和姿态
+                            base_pos_policy = policy_body_pos_w[0, 0, :]  # (3,) - XYZ 位置
+                            base_quat_policy = policy_body_quat_w[0, 0, :]  # (4,) - 四元数
+                            
+                            # ⚠️ 重要：将 ghost 位置偏移到对应环境的 env_origins
+                            # policy 输出的位置是相对于原点的，需要加上环境偏移
+                            base_pos_with_offset = base_pos_policy.copy()
+                            base_pos_with_offset[0] += env_origins[env_i, 0]  # X 方向偏移
+                            base_pos_with_offset[1] += env_origins[env_i, 1]  # Y 方向偏移
+                            
+                            # 提取参考轨迹的关节角度（joint_seq 顺序）
+                            joint_pos_ref_seq = motionrefinputpos[timestep_i, :]  # (num_joints,)
+                            
+                            # 转换为 dof 顺序（joint_xml 顺序）
+                            ghost_joint_pos_dof = np.array([
+                                joint_pos_ref_seq[joint_seq.index(joint)] 
+                                for joint in joint_xml
+                            ])
+                            
+                            # 构造完整的 ghost_qpos（使用加了偏移的位置）
+                            ghost_qpos = ghost_renderer_list[env_i].construct_ghost_qpos(
+                                base_pos=base_pos_with_offset,  # 使用加了偏移的位置
+                                base_quat=base_quat_policy,
+                                joint_pos_dof_order=ghost_joint_pos_dof,
+                                current_qpos=dlist[env_i].qpos
+                            )
+                            
+                            # 设置 ghost 姿态
+                            ghost_renderer_list[env_i].set_ghost_qpos(ghost_qpos)
+                            
+                        except Exception as e:
+                            if timestep % 100 == 0:  # 每100步打印一次错误
+                                print(f"[警告] 环境 {env_i} Ghost qpos 构造失败: {e}")
                 # ===== Ghost Qpos 构造结束 =====
                 
                 # 时间步加1，准备处理下一帧数据
@@ -518,7 +563,7 @@ if __name__ == "__main__":
                 viewer.user_scn.ngeom = 0
                 
                 # ===== 渲染主环境的 Ghost =====
-                if show_main_ghost.value:
+                if ghost_rendering_enabled and show_main_ghost.value:
                     try:
                         idx = current_env_idx.value
                         ghost_renderer_list[idx].render_ghost(viewer.user_scn)
@@ -528,7 +573,7 @@ if __name__ == "__main__":
                 # ===== 主环境 Ghost 渲染结束 =====
                 
                 # ===== 渲染其他环境的 Ghost =====
-                if show_other_ghosts.value and show_other_envs.value:
+                if ghost_rendering_enabled and show_other_ghosts.value and show_other_envs.value:
                     for i in range(num_envs):
                         if i == current_env_idx.value:
                             continue  # 跳过主环境
@@ -544,6 +589,7 @@ if __name__ == "__main__":
                 force_info = force_applicator.get_force_info(data_list=dlist)
                 if force_info is not None:
                     force_vectors = force_info['force_vectors']
+                    force_scale = force_info.get('force_scale', 0.02)  # 获取动态 force_scale
                     
                     # 默认只渲染主环境的外力
                     if len(force_vectors) > current_env_idx.value:
@@ -553,7 +599,8 @@ if __name__ == "__main__":
                                 m,
                                 dlist[current_env_idx.value],
                                 force_info['body_id'],
-                                force_vectors[current_env_idx.value]
+                                force_vectors[current_env_idx.value],
+                                force_scale=force_scale  # 传递动态 force_scale
                             )
                         except Exception as e:
                             if timestep % 100 == 0:
@@ -571,7 +618,8 @@ if __name__ == "__main__":
                                         m,
                                         dlist[env_i],
                                         force_info['body_id'],
-                                        force_vectors[env_i]
+                                        force_vectors[env_i],
+                                        force_scale=force_scale  # 传递动态 force_scale
                                     )
                                 except Exception as e:
                                     if timestep % 100 == 0:
@@ -607,7 +655,10 @@ if __name__ == "__main__":
             else:
                 d.xfrc_applied[:] = 0
                 dlist[current_env_idx.value].xfrc_applied[:] = 0
-
+            # ===== 更新外力施加器（新增）=====
+            force_applicator.update(dlist)
+            # print('外力施加：', dlist[0].xfrc_applied[body_id])
+            # ===== 外力施加器更新结束 =====
             # 下面注释掉的代码用于精确控制仿真步长
             time_until_next_step = m.opt.timestep - (time.time() - step_start)
             if time_until_next_step > 0:

@@ -33,10 +33,10 @@ class ForceVisualizer:
             self.arrow_color = np.array(arrow_color, dtype=np.float32)
         
         # 箭头缩放因子（力大小到箭头长度的转换）
-        self.force_scale = 0.02  # 1N = 0.1m 长度
+        self.force_scale = 0.02  # 1N = 0.02m 长度
         self.arrow_width = 0.02  # 箭头宽度
     
-    def render_force_arrow(self, viewer_scene, model, data, body_id, force_vector):
+    def render_force_arrow(self, viewer_scene, model, data, body_id, force_vector, force_scale=None):
         """
         手动渲染外力（紫色 CAPSULE + 紫色 SPHERE）
         
@@ -50,6 +50,9 @@ class ForceVisualizer:
             data: mujoco.MjData 对象
             body_id: body 的 ID
             force_vector: 力向量 (3,) - [fx, fy, fz]
+            force_scale: 力缩放因子（1N = force_scale 米长度）
+                        如果为 None，使用默认值 self.force_scale
+                        Spring 模式下，会自动传入 1/k 确保箭头终点 = 引力中心
         """
         # 获取 body 的世界坐标位置
         body_pos = data.xpos[body_id].copy()
@@ -59,9 +62,12 @@ class ForceVisualizer:
         if force_magnitude < 1e-6:
             return  # 力太小，不渲染
         
+        # 使用传入的 force_scale，如果没有传入则使用默认值
+        current_force_scale = force_scale if force_scale is not None else self.force_scale
+        
         # 计算力的方向和终点
         force_direction = force_vector / force_magnitude
-        arrow_length = force_magnitude * self.force_scale
+        arrow_length = force_magnitude * current_force_scale
         force_end = body_pos + force_direction * arrow_length
         
         # 紫色

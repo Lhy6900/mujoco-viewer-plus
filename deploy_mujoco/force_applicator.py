@@ -79,11 +79,11 @@ class ForceApplicator:
         self.duration = 5.0  # 默认持续时间 5 秒（仅在 fixtime 模式下使用）
         
         # 恒定力参数（constant 模式）
-        self.force_magnitude = 20.0  # N
+        self.force_magnitude = 1200.0  # N
         self.force_direction = np.array([0.0, 1.0, 0.0])  # Y 正方向
         
         # 弹簧力参数（spring 模式）
-        self.spring_k = 50.0  # 弹簧系数 K
+        self.spring_k = 150.0  # 弹簧系数 K
         self.spring_center_bias = np.array([0.2, 0.2, 0.0])  # 引力中心偏置
         self.spring_centers = []  # 每个环境的引力中心 (num_envs, 3)，在 trigger 时初始化
         
@@ -431,6 +431,10 @@ class ForceApplicator:
             'elapsed_time': elapsed_time,
             'remaining_time': remaining_time,
             'duration': self.duration if self.force_mode['stop'] == 'fixtime' else None,
+            # ===== 方案1：自动计算 force_scale =====
+            # Spring 模式下，force_scale = 1/k，确保渲染的箭头终点 = 引力中心
+            # Constant 模式下，使用默认的 0.02
+            'force_scale': 1.0 / self.spring_k if self.force_mode['style'] == 'spring' else 0.02,
         }
         
         # 如果是 spring 模式，添加引力中心信息
