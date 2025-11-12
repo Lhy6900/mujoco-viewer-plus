@@ -18,6 +18,8 @@ from bm_logger import BMLogger
 from reward_calculator import compute_rewards
 from reward_plotter import RewardPlotter
 from ghost_renderer import GhostRenderer
+from force_applicator import ForceApplicator
+from force_visualizer import ForceVisualizer
 
 # 主程序入口
 if __name__ == "__main__":
@@ -27,6 +29,7 @@ if __name__ == "__main__":
     motion_ref_path = MOTION_REF_PATH
     xml_path = XML_PATH
     body_name = BODY_NAME
+    force_anchor_bodyname = 'left_knee_link'  # 使用名字指定外力锚点
     
     # 加载 ONNX 模型
     model = onnx.load(model_path)
@@ -146,6 +149,37 @@ if __name__ == "__main__":
         ghost_renderer_list.append(GhostRenderer(m))
     print(f"[Ghost 可视化] 已为 {num_envs} 个环境初始化 GhostRenderer，将显示半透明绿色参考轨迹")
     
+    # 获取body id（用于外力施加）
+    body_id = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, force_anchor_bodyname)
+    if body_id == -1:
+        raise ValueError(f"Body {force_anchor_bodyname} not found in model")
+
+    # 初始化外力施加器和可视化器
+    # 使用 force_anchor_bodyidx 参数指定施加外力的锚点
+    # force_mode 配置外力停止模式：'fixtime' 或 'keeping'
+    force_mode = {'stop': 'fixtime'}  # 可选：'fixtime' 或 'keeping'
+    try:
+        force_applicator = ForceApplicator(
+            m, 
+            body_name=force_anchor_bodyname, 
+            force_anchor_bodyidx=body_id,
+            force_mode=force_mode
+        )
+    except ValueError as e:
+        print(f"[错误] 初始化 ForceApplicator 失败: {e}")
+        print(f"  - 请检查 body_name='{force_anchor_bodyname}' 是否存在于模型中")
+        print(f"  - 模型包含的 body 数量: {m.nbody}")
+        exit(1)
+    
+    force_visualizer = ForceVisualizer()
+    print("[外力系统] 已初始化 ForceApplicator 和 ForceVisualizer")
+    if force_mode['stop'] == 'fixtime':
+        print("  └─ 按 Ctrl+F 施加外力（Y 方向 20N，持续 5 秒）")
+    else:
+        print("  └─ 按 Ctrl+F 施加/停止外力（Y 方向 20N，持续直到再次按 Ctrl+F）")
+
+
+    
     # 多环境初始化，包括action_buffer,timestep,motion_input还有默认位置，注意下面两个for循环不能合并，timestep列表要先完成初始化
     action_buffer_list = []
     timestep_list = []
@@ -172,11 +206,6 @@ if __name__ == "__main__":
         # 使用网格布局设置每个环境的初始位置
         dlist[i].qpos[0] = env_origins[i, 0]  # x 位置
         dlist[i].qpos[1] = env_origins[i, 1]  # y 位置
-
-    # 获取body id
-    body_id = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, body_name)
-    if body_id == -1:
-        raise ValueError(f"Body {body_name} not found in model")
     
     # 当前选择的主环境索引（用于交互）
     current_env_idx = Value('i', 0)  # 使用共享内存变量
@@ -192,6 +221,7 @@ if __name__ == "__main__":
     vopt = mujoco.MjvOption()
     pert = mujoco.MjvPerturb()
     catmask = mujoco.mjtCatBit.mjCAT_DYNAMIC.value
+
     
     # 定义快捷键切换环境的回调函数
     def key_callback(key):
@@ -202,6 +232,9 @@ if __name__ == "__main__":
         - Ctrl+G: 切换主环境的 ghost 显示
         - Ctrl+M: 切换其他环境的 ghost 显示
         - Ctrl+R: 切换奖励曲线显示
+        - Ctrl+F: 施加/停止外力（根据 force_mode 配置）
+            * fixtime 模式：施加固定时间的外力（默认 5 秒）
+            * keeping 模式：切换外力开/关状态
         """
         # 检测 Ctrl 键按下和释放
         if key == 341 or key == 345:  # GLFW_KEY_LEFT_CONTROL 或 GLFW_KEY_RIGHT_CONTROL
@@ -241,6 +274,15 @@ if __name__ == "__main__":
             status = "显示" if show_reward_plot.value else "隐藏"
             print(f"[奖励可视化] {status}奖励曲线窗口")
             ctrl_pressed.value = 0  # 重置 Ctrl 状态
+        # Ctrl+F - 触发外力施加（或在 keeping 模式下切换开/关）
+        elif (key == 70 or key == 102) and ctrl_pressed.value:  # 'F' 或 'f' + Ctrl
+            force_applicator.trigger(
+                duration=5.0,
+                force_magnitude=20.0,
+                force_direction=np.array([0.0, 1.0, 0.0]),  # Y 正方向
+                data_list=dlist  # 传递 dlist 用于 keeping 模式切换
+            )
+            ctrl_pressed.value = 0  # 重置 Ctrl 状态
     
     # 启动mujoco可视化窗口，传入键盘回调
     with mujoco.viewer.launch_passive(m, d, key_callback=key_callback) as viewer:
@@ -262,6 +304,10 @@ if __name__ == "__main__":
                 tau_i = pd_control(target_dof_pos_list[i], dlist[i].qpos[7:], stiffness_array, np.zeros_like(damping_array), dlist[i].qvel[6:], damping_array)
                 dlist[i].ctrl[:] = tau_i
                 mujoco.mj_step(m, dlist[i])
+            
+            # ===== 更新外力施加器（新增）=====
+            force_applicator.update(dlist)
+            # ===== 外力施加器更新结束 =====
             
             # counter 共用
             counter += 1
@@ -316,12 +362,6 @@ if __name__ == "__main__":
                         for joint in joint_seq
                     ])
                     last_qvel_for_reward = current_joint_vel_seq.copy()
-                    
-                    # 每50步打印一次奖励值
-                    if timestep % 50 == 0:
-                        print(f"\n[Rewards @ step {timestep}]")
-                        for name, value in rewards.items():
-                            print(f"  {name:25s}: {value:+.6f}")
                     
                     # 更新奖励绘图器
                     reward_plotter.update(rewards)
@@ -478,6 +518,42 @@ if __name__ == "__main__":
                             if timestep % 100 == 0:
                                 print(f"[警告] 环境 {i} Ghost 渲染失败: {e}")
                 # ===== 其他环境 Ghost 渲染结束 =====
+                
+                # ===== 渲染外力箭头 =====
+                # 获取当前外力信息并渲染箭头
+                force_info = force_applicator.get_force_info()
+                if force_info is not None:
+                    # 默认只渲染主环境的外力
+                    try:
+                        force_visualizer.render_force_arrow(
+                            viewer.user_scn,
+                            m,
+                            dlist[current_env_idx.value],
+                            force_info['body_id'],
+                            force_info['force_vector']
+                        )
+                    except Exception as e:
+                        if timestep % 100 == 0:
+                            print(f"[警告] 主环境外力箭头渲染失败: {e}")
+                    
+                    # 只有在 show_other_envs 为 True 时才渲染其他环境的外力
+                    if show_other_envs.value:
+                        for env_i in range(num_envs):
+                            if env_i == current_env_idx.value:
+                                continue  # 跳过主环境（已经渲染过）
+                            try:
+                                force_visualizer.render_force_arrow(
+                                    viewer.user_scn,
+                                    m,
+                                    dlist[env_i],
+                                    force_info['body_id'],
+                                    force_info['force_vector']
+                                )
+                            except Exception as e:
+                                if timestep % 100 == 0:
+                                    print(f"[警告] 环境 {env_i} 外力箭头渲染失败: {e}")
+                # ===== 外力箭头渲染结束 =====
+
                 
                 # 只有在 show_other_envs 为 True 时才渲染其他环境
                 if show_other_envs.value:
