@@ -44,7 +44,7 @@ deploy_mujoco/
 - `Ctrl+M`: 显示/隐藏主环境外其他环境的Ghost
 - `Ctrl+G`: 切换主环境 Ghost 显示
 - `Ctrl+F`: 触发/停止外力
-- `Esc`: 退出
+
 
 ## 📝 版本
 
