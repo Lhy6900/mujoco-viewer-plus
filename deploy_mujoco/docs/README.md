@@ -89,6 +89,7 @@ FORCE_CONFIG = {
 
 - **自动网格布局**：环境自动排列成网格
 - **独立仿真**：每个环境独立步进
+- **独立策略**：每个环境可执行不同policy
 - **环境切换**：按 `↑` / `↓` 键切换主视角环境
 
 ### 2. Ghost 渲染
@@ -112,7 +113,6 @@ FORCE_CONFIG = {
 
 - **自动缩放**：弹簧模式下，箭头终点自动指向引力中心
 
-详细文档：[force_system.md](force_system.md)
 
 ### 4. 奖励系统
 
@@ -120,7 +120,6 @@ FORCE_CONFIG = {
 - **实时可视化**：右侧显示奖励曲线
 - **灵活配置**：可启用/禁用任意奖励项
 
-详细文档：[reward_system.md](reward_system.md)
 
 ## 🔧 用户自定义指南
 
@@ -225,8 +224,7 @@ SimulationCoordinator (协调器，~550 行)
 
 - `compute_action(obs, timestep, env_idx)`: 计算单环境动作
 - `compute_actions_batch(obs_list, timestep)`: 批量推理（多环境）
-- `compute_ghost_outputs(obs, timestep, env_idx)`: Ghost 渲染输出
-- 支持 `'imitation'`, `'locomotion'`, `'custom'` 三种策略类型
+- `compute_ghost_outputs(obs, timestep, env_idx)`: Ghost 参考轨迹
 
 ### core.ObservationBuilder
 
@@ -276,49 +274,8 @@ SimulationCoordinator (协调器，~550 行)
 | `Ctrl+M` | 切换其他环境 Ghost |
 | `Ctrl+F` | 触发/停止外力 |
 | `Ctrl+R` | 显示/隐藏奖励曲线窗口 |
-| `Space` | 暂停/继续仿真 |
-| `Esc` | 退出 |
 
-## 📖 进阶文档
 
-- [外力系统详细说明](force_system.md)
-- [Ghost 渲染详细说明](ghost_rendering.md)
-- [奖励系统详细说明](reward_system.md)
 
-## 🐛 调试
 
-### 启用详细日志
 
-```python
-# 在 bmwoyaw_multienv.py 开头添加
-import logging
-logging.basicConfig(level=logging.DEBUG)
-```
-
-### 检查环境状态
-
-```python
-# 在主循环中添加
-state = env_manager.get_state(0)
-print(f"Env 0 qpos: {state['qpos']}")
-```
-
-### Ghost 不显示？
-
-1. 检查是否成功加载参考运动数据
-2. 确认 `POLICY_CONFIG['enable_ghost'] = True`
-3. 按 `Ctrl+G` 确保 Ghost 已启用
-
-### 外力不生效？
-
-1. 检查 `FORCE_CONFIG['mode']['select']` 是否正确
-2. 确认按下了 `Ctrl+F`
-3. 查看控制台输出
-
-## 🤝 贡献
-
-欢迎提交 Issue 和 Pull Request！
-
-## 📄 许可
-
-MIT License
