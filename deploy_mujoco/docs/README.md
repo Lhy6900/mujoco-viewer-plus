@@ -29,16 +29,7 @@ deploy_mujoco/
 │   ├── logger.py                # 日志记录
 │   └── data_loader.py           # 数据加载
 │
-├── docs/                         # 【文档】
-│   ├── README.md                # 本文档
-│   ├── force_system.md          # 外力系统文档
-│   ├── ghost_rendering.md       # Ghost 渲染文档
-│   └── reward_system.md         # 奖励系统文档
-│
-├── legacy/                       # 【旧代码】历史版本（已废弃）
-├── module/                       # 【旧模块】actor_critic 等（已废弃）
-├── tests/                        # 【测试】测试脚本
-└── configs/                      # 【配置文件】机器人配置（YAML）
+└── docs/README.md                # 本文档  
 ```
 
 ## 🚀 快速开始
