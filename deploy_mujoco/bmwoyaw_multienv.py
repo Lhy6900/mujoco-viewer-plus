@@ -40,7 +40,7 @@ def main():
         'simulation_dt': SIMULATION_DT,
         
         # 策略配置
-        'policy_type': 'imitation',  # 'imitation' | 'locomotion' | 'custom'
+        'policy_type': 'imitation',  # 'imitation' | 'custom'
         
         # 观测配置
         'obs_config': {
