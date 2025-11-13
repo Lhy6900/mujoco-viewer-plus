@@ -22,7 +22,7 @@ deploy_mujoco/
 
 ## 📖 详细文档
 
-请查看 [docs/README.md]
+请查看 [deploy_mujoco/docs/README.md]
 
 ## 🔧 修改配置
 
