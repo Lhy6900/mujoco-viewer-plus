@@ -73,6 +73,7 @@ class PolicyRunner:
         
         if self.joint_names:
             print(f"[策略加载] → 关节数量: {len(self.joint_names)}")
+            print(f"[策略加载] → 关节顺序: {self.joint_names}")
     
     def compute_action(self, obs, timestep=None, output_names=None, env_idx=0):
         """

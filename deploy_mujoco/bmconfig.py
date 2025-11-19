@@ -7,10 +7,13 @@ Beyond Mimic 配置文件
 import numpy as np
 
 # ==================== 路径配置 ====================
-MODEL_PATH = "/home/ubuntu/deploy_mini/model/BM_ONNX/dalafan_woyaw.onnx"
-MOTION_REF_PATH = "/home/ubuntu/deploy_mini/deploy_mujoco/bm_traj_npz/dalafan.npz"
+# MODEL_PATH = "/home/ubuntu/deploy_mini/model/BM_ONNX/dalafan_woyaw.onnx"          # origin
+# MODEL_PATH = "/home/ubuntu/deploy_mini/model/BM_ONNX/2025-11-16_18-55-18_small_spring_newrwd.onnx"  # compliance
+MODEL_PATH = "/home/ubuntu/deploy_mini/model/BM_UPPER_ONNX/2025-11-18_21-39-22_charlston_upper_nospring.onnx"
+# MOTION_REF_PATH = "/home/ubuntu/deploy_mini/deploy_mujoco/bm_traj_npz/dalafan.npz"          #whole body dance charlston
+MOTION_REF_PATH = "/home/ubuntu/deploy_mini/deploy_mujoco/bm_traj_npz/chalston_upper_v1.npz"   #upper body charlston
 XML_PATH = '/home/ubuntu/deploy_mini/resources/robots/g1_description/g1_29dof_zy.xml'
-LOG_SAVE_PATH = "./logs/BM_log.npz"
+LOG_SAVE_PATH = "./logs/test.npz"
 
 # ==================== 策略配置 ====================
 POLICY_CONFIG = {
@@ -19,7 +22,7 @@ POLICY_CONFIG = {
 }
 
 # ==================== 环境配置 ====================
-NUM_ENVS = 4                    # 环境数量
+NUM_ENVS = 2                    # 环境数量
 ENV_SPACING = 3.0               # 环境间距（米）
 SIMULATION_DT = 0.002           # 仿真时间步长
 CONTROL_DECIMATION = 10         # 控制降采样率
@@ -65,16 +68,16 @@ REWARD_CONFIG = {
 
 # ==================== 外力配置 ====================
 FORCE_CONFIG = {
-    'anchor_body': 'left_knee_link',  # 施加外力的 body 名称
+    'anchor_body': 'torso_link',  # 施加外力的 body 名称
     'mode': {
-        'stop': 'keeping',      # 'fixtime': 固定时间 | 'keeping': 持续切换
-        'style': 'spring',      # 'constant': 恒定力 | 'spring': 弹簧力
-        'select': 0,            # None: 无 | 0: 仅主环境 | 1: 所有 | [0,2]: 列表
+        'stop': 'fixtime',      # 'fixtime': 固定时间 | 'keeping': 持续切换
+        'style': 'constant',      # 'constant': 恒定力 | 'spring': 弹簧力
+        'select': 1,            # None: 无 | 0: 仅主环境 | 1: 所有 | [0,2]: 列表
     },
     'constant': {
-        'magnitude': 20.0,      # 恒定力大小（N）
-        'direction': [0, 1, 0], # 恒定力方向（单位向量）
-        'duration': 5.0,        # fixtime 模式的持续时间（秒）
+        'magnitude': 60.0,      # 恒定力大小（N）
+        'direction': [0, -1, 0], # 恒定力方向（单位向量）
+        'duration': 4.0,        # fixtime 模式的持续时间（秒）
     },
     'spring': {
         'k': 50.0,              # 弹簧系数
@@ -138,3 +141,38 @@ JOINT_XML = [
     "right_wrist_pitch_joint",
     "right_wrist_yaw_joint"
 ]
+
+# 关节顺序 (Lab中的关节顺序)
+JOINT_LAB = [
+    'left_hip_pitch_joint',         # 0
+    'right_hip_pitch_joint',        # 1    
+    'waist_yaw_joint',              # 2   ####
+    'left_hip_roll_joint',          # 3
+    'right_hip_roll_joint',         # 4
+    'waist_roll_joint',             # 5   ####
+    'left_hip_yaw_joint',           # 6
+    'right_hip_yaw_joint',          # 7
+    'waist_pitch_joint',            # 8   ####
+    'left_knee_joint',              # 9
+    'right_knee_joint',             # 10
+    'left_shoulder_pitch_joint',    # 11  ####
+    'right_shoulder_pitch_joint',   # 12  ####
+    'left_ankle_pitch_joint',       # 13
+    'right_ankle_pitch_joint',      # 14
+    'left_shoulder_roll_joint',     # 15  ####
+    'right_shoulder_roll_joint',    # 16  ####
+    'left_ankle_roll_joint',        # 17
+    'right_ankle_roll_joint',       # 18
+    'left_shoulder_yaw_joint',      # 19  ####
+    'right_shoulder_yaw_joint',     # 20  ####
+    'left_elbow_joint',             # 21  ####
+    'right_elbow_joint',            # 22  ####
+    'left_wrist_roll_joint',        # 23  ####
+    'right_wrist_roll_joint',       # 24  ####
+    'left_wrist_pitch_joint',       # 25  ####
+    'right_wrist_pitch_joint',      # 26  ####
+    'left_wrist_yaw_joint',         # 27  ####
+    'right_wrist_yaw_joint'         # 28  ####
+]
+#下半身+PELVIS+TORSO列表：[0，1，3，4，6，7，9，10，13，14，17，18，]
+# 上半身列表：[2，5，8，11，12，15，16，19，20，21，22，23，24，25，26，27，28]

@@ -158,7 +158,7 @@ class SimulationCoordinator:
                 'body_pos_w': motionref["body_pos_w"],
                 'body_quat_w': motionref["body_quat_w"],
                 'joint_pos': motionref["joint_pos"],
-                'joint_vel': motionref["joint_vel"]
+                'joint_vel': motionref["joint_vel"],
             }
             self.ghost_rendering_enabled = True
             print(f"[协调器] ✓ 成功加载参考运动数据：{motion_ref_path}")
@@ -179,7 +179,8 @@ class SimulationCoordinator:
             data=data,
             motion_data=self.motion_data,
             action_buffer=action_buffer,
-            timestep=timestep
+            timestep=timestep,
+            idx=env_idx
         )
         
         return obs
